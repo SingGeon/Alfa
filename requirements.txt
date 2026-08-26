@@ -1,0 +1,33 @@
+# --- Backend ---
+Flask==3.0.3
+python-dotenv==1.0.1
+APScheduler==3.10.4
+requests==2.32.3
+
+# --- Database ---
+pymongo==4.8.0
+
+# --- ML / data ---
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.1
+
+# --- NLP ---
+vaderSentiment==3.3.2
+feedparser==6.0.11
+
+# --- Frontend ---
+streamlit==1.37.1
+plotly==5.23.0
+
+# --- Optional forecasting backends (install manually if you want them) ---
+# prophet==1.1.5
+# tensorflow==2.17.0
+
+# --- Optional narrative summary via Claude ---
+# anthropic==0.34.0
+
+# --- Dev / tests ---
+pytest==8.3.2
+mongomock==4.1.2
+requests-mock==1.12.1
