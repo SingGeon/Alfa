@@ -25,16 +25,33 @@ from ml.features import FEATURE_COLUMNS, add_technical_features, make_supervised
 
 logger = logging.getLogger(__name__)
 
-_INTERVAL_TIMEDELTA = {"1h": timedelta(hours=1), "1d": timedelta(days=1), "1w": timedelta(weeks=1)}
+_INTERVAL_TIMEDELTA = {
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+    "1w": timedelta(weeks=1),
+}
+
+# Small ensemble of differently-seeded models, averaged at predict time,
+# instead of one single fit. A single GradientBoostingRegressor's output
+# depends noticeably on its random_state on datasets this small (a few
+# hundred to ~1000 rows); averaging several smooths that noise out into a
+# steadier point estimate and a less erratic confidence interval, at the
+# (one-time, now cached - see api/services.py) cost of training 3x as many
+# trees.
+_ENSEMBLE_SEEDS = (0, 21, 42)
 
 
 class PricePredictor:
-    def __init__(self, backend: str = "sklearn", feature_cols: list[str] | None = None):
+    def __init__(self, backend: str = "sklearn", feature_cols: list[str] | None = None, ensemble_size: int = len(_ENSEMBLE_SEEDS)):
         self.backend = backend
         self.feature_cols = feature_cols or FEATURE_COLUMNS
-        self._model = None          # mean predictor
-        self._model_lower = None    # lower-quantile predictor (confidence interval)
-        self._model_upper = None    # upper-quantile predictor
+        self.ensemble_size = max(1, min(ensemble_size, len(_ENSEMBLE_SEEDS)))
+        self._models = []          # ensemble of mean predictors (sklearn backend)
+        self._models_lower = []    # ensemble of lower-quantile predictors
+        self._models_upper = []    # ensemble of upper-quantile predictors
+        self._model = None          # single-model backends (prophet)
         self._last_close = None
         self._fitted = False
 
@@ -81,22 +98,36 @@ class PricePredictor:
                 f"Not enough history to train ({len(X)} rows) - need at least 30. "
                 "Let the collector run longer or backfill more candles."
             )
-        self._model = GradientBoostingRegressor(random_state=42)
-        self._model.fit(X, y)
-
-        # Quantile-loss models give a real, data-driven confidence interval
-        # instead of a fixed +/-X% band.
-        self._model_lower = GradientBoostingRegressor(loss="quantile", alpha=0.1, random_state=42)
-        self._model_lower.fit(X, y)
-        self._model_upper = GradientBoostingRegressor(loss="quantile", alpha=0.9, random_state=42)
-        self._model_upper.fit(X, y)
+        # Ensemble: same hyperparameters, different random_state, averaged
+        # at predict time (see _ENSEMBLE_SEEDS). Quantile-loss models give a
+        # real, data-driven confidence interval instead of a fixed +/-X% band.
+        # ensemble_size lets latency-sensitive callers (an on-demand detail
+        # view someone is actively waiting on) trade a bit of smoothing for
+        # speed - see PricePredictor.__init__.
+        seeds = _ENSEMBLE_SEEDS[: self.ensemble_size]
+        self._models = [GradientBoostingRegressor(random_state=s).fit(X, y) for s in seeds]
+        self._models_lower = [
+            GradientBoostingRegressor(loss="quantile", alpha=0.1, random_state=s).fit(X, y) for s in seeds
+        ]
+        self._models_upper = [
+            GradientBoostingRegressor(loss="quantile", alpha=0.9, random_state=s).fit(X, y) for s in seeds
+        ]
 
     def _predict_sklearn(self, df: pd.DataFrame, steps: int, interval: str) -> list[dict]:
         step_delta = _INTERVAL_TIMEDELTA[interval]
         history = add_technical_features(df[["open", "high", "low", "close", "volume"]].copy())
-        # sentiment doesn't extrapolate; hold the last known score flat for future steps
+        # None of sentiment/btc_return_1/tvl_momentum extrapolate from OHLCV
+        # alone (they come from merge_sentiment/merge_btc_returns/
+        # merge_defi_tvl in build_feature_frame, which this recursive
+        # re-derivation deliberately skips - recomputing them per future
+        # step would need data we don't have yet) - hold each at its last
+        # known real value for every future step instead.
         last_sentiment = df["sentiment"].iloc[-1] if "sentiment" in df.columns and len(df) else 0.0
         history["sentiment"] = df["sentiment"] if "sentiment" in df.columns else last_sentiment
+        last_btc_return = df["btc_return_1"].iloc[-1] if "btc_return_1" in df.columns and len(df) else 0.0
+        history["btc_return_1"] = df["btc_return_1"] if "btc_return_1" in df.columns else last_btc_return
+        last_tvl_momentum = df["tvl_momentum"].iloc[-1] if "tvl_momentum" in df.columns and len(df) else 0.0
+        history["tvl_momentum"] = df["tvl_momentum"] if "tvl_momentum" in df.columns else last_tvl_momentum
 
         results = []
         last_timestamp = history.index[-1]
@@ -107,9 +138,9 @@ class PricePredictor:
                 # rather than feeding the model garbage.
                 logger.warning("Insufficient rolling history for a further step, stopping early")
                 break
-            log_return = float(self._model.predict(row)[0])
-            log_return_low = float(self._model_lower.predict(row)[0])
-            log_return_high = float(self._model_upper.predict(row)[0])
+            log_return = float(np.mean([m.predict(row)[0] for m in self._models]))
+            log_return_low = float(np.mean([m.predict(row)[0] for m in self._models_lower]))
+            log_return_high = float(np.mean([m.predict(row)[0] for m in self._models_upper]))
 
             last_close = float(history["close"].iloc[-1])
             predicted_price = last_close * np.exp(log_return)
@@ -140,6 +171,10 @@ class PricePredictor:
             history = add_technical_features(history[["open", "high", "low", "close", "volume"]])
             history["sentiment"] = history["sentiment"] if "sentiment" in history else last_sentiment
             history.loc[last_timestamp, "sentiment"] = last_sentiment
+            history["btc_return_1"] = history["btc_return_1"] if "btc_return_1" in history else last_btc_return
+            history.loc[last_timestamp, "btc_return_1"] = last_btc_return
+            history["tvl_momentum"] = history["tvl_momentum"] if "tvl_momentum" in history else last_tvl_momentum
+            history.loc[last_timestamp, "tvl_momentum"] = last_tvl_momentum
 
         return results
 
@@ -158,7 +193,7 @@ class PricePredictor:
         self._model.fit(data)
 
     def _predict_prophet(self, df: pd.DataFrame, steps: int, interval: str) -> list[dict]:
-        freq = {"1h": "h", "1d": "D", "1w": "W"}[interval]
+        freq = {"15m": "15min", "1h": "h", "4h": "4h", "1d": "D", "1w": "W"}[interval]
         future = self._model.make_future_dataframe(periods=steps, freq=freq)
         forecast = self._model.predict(future)
         tail = forecast.tail(steps)

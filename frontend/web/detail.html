@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detaliu activ — Scout AI</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/scout.css">
+<link rel="stylesheet" href="/detail.css">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" id="assetBadge">?</span>
+      <span class="brand-name" id="assetName">—</span>
+    </div>
+
+    <div class="ticker">
+      <span class="ticker-pair" id="assetSymbol"></span>
+      <span class="ticker-price" id="price">&nbsp;</span>
+      <span class="ticker-change" id="change"></span>
+    </div>
+
+    <div class="topbar-actions">
+      <button id="pinToggle" class="nav-link pin-toggle-btn" type="button">☆ Fixează</button>
+      <a class="nav-link" href="/scout.html">← Scout AI</a>
+    </div>
+  </header>
+
+  <div id="errorBanner" class="error-banner" hidden></div>
+
+  <main class="layout">
+    <section class="chart-panel">
+      <div class="chart-wrap">
+        <div id="chart" class="chart"></div>
+        <div id="chartEmpty" class="chart-empty">
+          <div class="chart-spinner"></div>
+          <span>Se analizează date + știri reale...</span>
+        </div>
+        <div id="chartTooltip" class="chart-tooltip" hidden></div>
+      </div>
+      <div class="chart-legend">
+        <span class="legend-item"><i class="dot up"></i>Creștere</span>
+        <span class="legend-item"><i class="dot down"></i>Scădere</span>
+        <span class="legend-item"><i class="dot pred"></i>Predicție</span>
+        <span class="legend-item"><i class="dot band"></i>Interval de încredere</span>
+      </div>
+    </section>
+
+    <aside class="side-panel">
+      <div class="card stat-card">
+        <div class="stat">
+          <span class="stat-label">Scor de încredere</span>
+          <span class="stat-value" id="confidence">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Sentiment mediu</span>
+          <span class="stat-value" id="sentimentAvg">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Model</span>
+          <span class="stat-value stat-value--small">sklearn (ensemble)</span>
+        </div>
+      </div>
+
+      <div class="card prediction-table-card">
+        <div class="card-header">Predicție (7 zile)</div>
+        <div class="table-scroll">
+          <table class="prediction-table">
+            <thead><tr><th>Zi</th><th>Preț</th><th>vs. acum</th></tr></thead>
+            <tbody id="predictionRows">
+              <tr class="empty-row"><td colspan="3">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <section class="card narrative-card">
+    <div class="card-header">De ce și când — estimare model</div>
+    <p id="narrative" class="narrative">Se încarcă...</p>
+  </section>
+
+  <section class="card news-card">
+    <div class="card-header">Știri analizate</div>
+    <div class="news-list" id="newsList">
+      <p class="empty-hint">—</p>
+    </div>
+  </section>
+
+</div>
+<script src="/detail.js"></script>
+</body>
+</html>

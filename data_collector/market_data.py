@@ -22,10 +22,10 @@ from data_collector.http_utils import ExternalAPIError, get_json
 logger = logging.getLogger(__name__)
 
 # Binance kline intervals are already exactly what we want to expose.
-SUPPORTED_INTERVALS = {"1h", "1d", "1w"}
+SUPPORTED_INTERVALS = {"15m", "1h", "4h", "1d", "1w"}
 
 # CoinGecko `days` parameter used as a fallback per requested interval.
-_COINGECKO_DAYS_BY_INTERVAL = {"1h": 1, "1d": 30, "1w": 90}
+_COINGECKO_DAYS_BY_INTERVAL = {"15m": 1, "1h": 1, "4h": 14, "1d": 30, "1w": 90}
 
 
 class MarketDataError(ExternalAPIError):
@@ -42,8 +42,28 @@ def _request_with_retry(url: str, params: dict | None = None, max_retries: int =
 def get_current_price(coin_id: str = config.COIN_ID, vs_currency: str = config.VS_CURRENCY) -> dict:
     """Current price, 24h volume, 24h change and market cap.
 
-    Tries CoinGecko first, falls back to Binance's 24hr ticker (USD only).
+    Tries Binance first, falls back to CoinGecko. Binance is preferred
+    because it's where our candle history (get_ohlc_candles) also comes
+    from - using the same exchange for both keeps the ticker and the
+    chart's last candle consistent with each other, and Binance's ticker
+    is a real, tick-by-tick exchange price rather than CoinGecko's
+    aggregated read (which only refreshes on CoinGecko's own cadence,
+    independent of how often we poll it).
     """
+    if vs_currency.lower() == "usd":
+        try:
+            url = f"{config.BINANCE_API_BASE}/ticker/24hr"
+            data = _request_with_retry(url, {"symbol": config.BINANCE_SYMBOL}, max_retries=1, timeout=6)
+            return {
+                "price": float(data["lastPrice"]),
+                "market_cap": None,
+                "volume_24h": float(data["quoteVolume"]),
+                "change_24h_pct": float(data["priceChangePercent"]),
+                "source": "binance",
+            }
+        except MarketDataError as exc:
+            logger.warning("Binance current price failed (%s), falling back to CoinGecko", exc)
+
     try:
         url = f"{config.COINGECKO_API_BASE}/simple/price"
         params = {
@@ -54,7 +74,7 @@ def get_current_price(coin_id: str = config.COIN_ID, vs_currency: str = config.V
             "include_24hr_change": "true",
             "include_last_updated_at": "true",
         }
-        data = _request_with_retry(url, params)[coin_id]
+        data = _request_with_retry(url, params, max_retries=1, timeout=6)[coin_id]
         return {
             "price": data.get(vs_currency),
             "market_cap": data.get(f"{vs_currency}_market_cap"),
@@ -63,21 +83,7 @@ def get_current_price(coin_id: str = config.COIN_ID, vs_currency: str = config.V
             "source": "coingecko",
         }
     except (MarketDataError, KeyError) as exc:
-        logger.warning("CoinGecko current price failed (%s), falling back to Binance", exc)
-
-    if vs_currency.lower() == "usd":
-        try:
-            url = f"{config.BINANCE_API_BASE}/ticker/24hr"
-            data = _request_with_retry(url, {"symbol": config.BINANCE_SYMBOL})
-            return {
-                "price": float(data["lastPrice"]),
-                "market_cap": None,
-                "volume_24h": float(data["quoteVolume"]),
-                "change_24h_pct": float(data["priceChangePercent"]),
-                "source": "binance",
-            }
-        except MarketDataError as exc:
-            logger.warning("Binance current price failed (%s), falling back to Etherscan", exc)
+        logger.warning("CoinGecko current price failed (%s), falling back to Etherscan", exc)
 
     # Last resort: Etherscan (ETH/USD only, no volume/market cap - needs ETHERSCAN_API_KEY).
     if coin_id == "ethereum" and vs_currency.lower() == "usd":
@@ -98,12 +104,12 @@ def get_current_price(coin_id: str = config.COIN_ID, vs_currency: str = config.V
 
 def get_ohlc_candles(
     interval: str = "1h",
-    limit: int = 200,
+    limit: int = 1000,
     coin_id: str = config.COIN_ID,
     symbol: str = config.BINANCE_SYMBOL,
     vs_currency: str = config.VS_CURRENCY,
 ) -> list[dict]:
-    """OHLC candlestick history for `interval` in {"1h", "1d", "1w"}."""
+    """OHLC candlestick history for `interval` in {"15m", "1h", "4h", "1d", "1w"}."""
     if interval not in SUPPORTED_INTERVALS:
         raise ValueError(f"interval must be one of {SUPPORTED_INTERVALS}, got {interval!r}")
 
@@ -118,6 +124,12 @@ def get_ohlc_candles(
                 "low": float(k[3]),
                 "close": float(k[4]),
                 "volume": float(k[5]),
+                # Buyer-initiated (taker-buy) share of volume - Binance breaks
+                # every kline down into buy-side vs sell-side taker volume,
+                # a real proxy for "who's more aggressive right now" (cererea
+                # vs. oferta) rather than volume alone. See ml/features.py's
+                # taker_buy_ratio.
+                "taker_buy_volume": float(k[9]),
             }
             for k in raw
         ]

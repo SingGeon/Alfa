@@ -24,7 +24,13 @@ def get_db():
     if _db is not None:
         return _db
     try:
-        _client = MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=3000)
+        # tz_aware so datetimes read back from Mongo carry explicit UTC
+        # tzinfo - without it, .isoformat() drops the offset entirely
+        # (e.g. "2026-08-26T15:15:00" instead of "...+00:00"), and
+        # JavaScript's `new Date()` silently misreads such a string as
+        # LOCAL time instead of UTC, shifting every timestamp shown in
+        # the dashboard by the viewer's timezone offset.
+        _client = MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=3000, tz_aware=True)
         _client.admin.command("ping")
         _db = _client[config.MONGO_DB]
         _ensure_indexes(_db)
@@ -43,3 +49,4 @@ def _ensure_indexes(db) -> None:
     db.news.create_index([("url", 1)], unique=True)
     db.news.create_index([("published_at", -1)])
     db.predictions.create_index([("coin_id", 1), ("created_at", -1)])
+    db.scout_results.create_index([("asset_type", 1), ("score", -1)])

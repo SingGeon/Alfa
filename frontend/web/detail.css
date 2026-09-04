@@ -1,0 +1,21 @@
+.app { gap: 16px; }
+
+.narrative-card,
+.news-card {
+  margin-top: 0;
+}
+
+.narrative-card .narrative {
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.news-card .news-list {
+  max-height: 420px;
+}
+
+.pin-toggle-btn.pinned {
+  background: rgba(230, 178, 44, 0.15);
+  border-color: rgba(230, 178, 44, 0.4);
+  color: var(--warning);
+}

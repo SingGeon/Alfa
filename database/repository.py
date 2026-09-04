@@ -126,3 +126,81 @@ def get_latest_prediction(coin_id: str) -> dict | None:
     if db is None:
         return None
     return db.predictions.find_one({"coin_id": coin_id}, {"_id": 0}, sort=[("created_at", -1)])
+
+
+# --- Scout results (underdog-asset scan, see scout/) ---------------------------
+
+def save_scout_results(results: Iterable[dict]) -> None:
+    """Replace the whole scout_results collection with the latest scan.
+
+    A full replace (not upsert-merge) is deliberate: an asset that no
+    longer clears the universe filters (e.g. dropped off a Yahoo screen)
+    should disappear from the results, not linger with a stale score.
+    """
+    db = get_db()
+    if db is None:
+        return
+    docs = [{**r, "scanned_at": _now()} for r in results]
+    try:
+        db.scout_results.delete_many({})
+        if docs:
+            db.scout_results.insert_many(docs)
+    except PyMongoError as exc:
+        logger.warning("Failed to save scout results: %s", exc)
+
+
+def get_scout_results(asset_type: str | None = None, limit: int = 100) -> list[dict]:
+    db = get_db()
+    if db is None:
+        return []
+    query = {"asset_type": asset_type} if asset_type else {}
+    cursor = db.scout_results.find(query, {"_id": 0}).sort("score", -1).limit(limit)
+    return list(cursor)
+
+
+# --- Pinned assets (user bookmarks, see scout.html "Fixate") -------------------
+#
+# Kept as its own tiny collection rather than a flag on scout_results: a
+# pin needs to survive save_scout_results()'s full delete+reinsert (an
+# asset can legitimately drop out of a scan - filters changed, it stopped
+# rising - without the user wanting to lose track of it).
+
+def pin_asset(asset_type: str, asset_id: str, symbol: str, name: str) -> None:
+    db = get_db()
+    if db is None:
+        return
+    try:
+        db.pinned_assets.update_one(
+            {"asset_type": asset_type, "id": asset_id},
+            {"$set": {"asset_type": asset_type, "id": asset_id, "symbol": symbol, "name": name},
+             "$setOnInsert": {"pinned_at": _now()}},
+            upsert=True,
+        )
+    except PyMongoError as exc:
+        logger.warning("Failed to pin asset: %s", exc)
+
+
+def unpin_asset(asset_type: str, asset_id: str) -> None:
+    db = get_db()
+    if db is None:
+        return
+    try:
+        db.pinned_assets.delete_one({"asset_type": asset_type, "id": asset_id})
+    except PyMongoError as exc:
+        logger.warning("Failed to unpin asset: %s", exc)
+
+
+def get_pinned_assets(asset_type: str | None = None) -> list[dict]:
+    db = get_db()
+    if db is None:
+        return []
+    query = {"asset_type": asset_type} if asset_type else {}
+    cursor = db.pinned_assets.find(query, {"_id": 0}).sort("pinned_at", -1)
+    return list(cursor)
+
+
+def get_pinned_asset(asset_type: str, asset_id: str) -> dict | None:
+    db = get_db()
+    if db is None:
+        return None
+    return db.pinned_assets.find_one({"asset_type": asset_type, "id": asset_id}, {"_id": 0})

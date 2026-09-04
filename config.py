@@ -39,15 +39,26 @@ NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 NEWS_RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
+    "https://decrypt.co/feed",
+    "https://www.theblock.co/rss.xml",
+    "https://cryptoslate.com/feed/",
+    "https://cryptonews.com/news/feed/",
+    "https://u.today/rss",
+    "https://www.newsbtc.com/feed/",
+    "https://bitcoinist.com/feed/",
+    "https://beincrypto.com/feed/",
 ]
-NEWS_KEYWORDS = ["ethereum", "eth "]
+NEWS_KEYWORDS = ["ethereum", "ether", "eth"]
 
 # --- Optional narrative summary ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # --- Scheduler ---
 COLLECT_INTERVAL_MINUTES = int(os.getenv("COLLECT_INTERVAL_MINUTES", "15"))
-NEWS_INTERVAL_MINUTES = int(os.getenv("NEWS_INTERVAL_MINUTES", "30"))
+NEWS_INTERVAL_MINUTES = int(os.getenv("NEWS_INTERVAL_MINUTES", "5"))
+# A full scout scan trains a real model per asset across ~80 assets, so it
+# runs far less often than the single-coin market/news jobs above.
+SCOUT_INTERVAL_MINUTES = int(os.getenv("SCOUT_INTERVAL_MINUTES", "60"))
 
 # --- Prediction ---
 PREDICTION_HORIZON_HOURS = int(os.getenv("PREDICTION_HORIZON_HOURS", "24"))
@@ -58,5 +69,5 @@ FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
 FLASK_DEBUG = _bool("FLASK_DEBUG", False)
 
-# Base URL the Streamlit dashboard uses to reach the Flask API.
+# Base URL the frontend dashboard uses to reach the Flask API.
 API_BASE_URL = os.getenv("API_BASE_URL", f"http://localhost:{FLASK_PORT}")

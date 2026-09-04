@@ -40,7 +40,7 @@ def test_collect_news_dedupes_across_sources(monkeypatch):
     monkeypatch.setattr(news_collector, "_from_newsapi", lambda: [
         {"title": "A dup", "url": "http://x.test/1", "source": "na", "published_at": None, "summary": ""}
     ])
-    monkeypatch.setattr(news_collector, "_from_rss", lambda: [
+    monkeypatch.setattr(news_collector, "_from_rss", lambda keywords=None: [
         {"title": "B", "url": "http://x.test/2", "source": "rss", "published_at": None, "summary": ""}
     ])
     result = news_collector.collect_news()

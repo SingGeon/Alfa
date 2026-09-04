@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout AI</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/scout.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">🔎</span>
+      <span class="brand-name">Scout AI — underdogs</span>
+    </div>
+
+    <div class="scout-header-note">
+      Scanează cripto și acțiuni mid/small-cap (nu top BTC/ETH/AAPL) și le clasează după potențial de creștere estimat.
+    </div>
+
+    <div class="topbar-actions">
+      <a class="nav-link" href="/">📈 ETH Price Predictor</a>
+      <span class="updated" id="scannedAt"></span>
+    </div>
+  </header>
+
+  <div id="errorBanner" class="error-banner" hidden></div>
+
+  <section class="scout-toolbar card">
+    <div class="asset-type-group" id="assetTypeGroup" role="group" aria-label="Tip activ">
+      <button data-type="" class="active" type="button">Toate</button>
+      <button data-type="crypto" type="button">Cripto</button>
+      <button data-type="stock" type="button">Acțiuni</button>
+    </div>
+    <button id="pinnedToggle" class="pinned-toggle" type="button">☆ Fixate</button>
+    <span class="scout-disclaimer">
+      doar active tranzacționabile pe Revolut · estimare informativă din model + știri · nu reprezintă sfat financiar · orizont ~7 zile
+    </span>
+  </section>
+
+  <section class="card scout-table-card">
+    <div class="table-scroll">
+      <table class="scout-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>#</th>
+            <th>Activ</th>
+            <th>Preț curent</th>
+            <th>Preț prezis</th>
+            <th>Schimbare prezisă</th>
+            <th>Încredere</th>
+            <th>Sentiment</th>
+            <th>Știri</th>
+            <th>Scor</th>
+          </tr>
+        </thead>
+        <tbody id="scoutRows">
+          <tr class="empty-row"><td colspan="10">Se încarcă...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</div>
+<script src="/scout.js"></script>
+</body>
+</html>
