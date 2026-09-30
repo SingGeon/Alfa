@@ -22,6 +22,7 @@ from data_collector.jobs import (
     record_prediction_snapshots_job,
     run_all_once,
 )
+from evaluation import jobs as evaluation_jobs
 from scout.scanner import run_scout_scan
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -78,6 +79,9 @@ def main() -> None:
         minutes=config.SCOUT_INTERVAL_MINUTES,
         id="scout_scan",
     )
+    # Mirrors run_api.py: prediction evaluation every minute + 00:05 UTC daily overview.
+    evaluation_jobs.register_jobs(scheduler)
+    threading.Thread(target=evaluation_jobs.startup_recovery, daemon=True, name="evaluation-recovery").start()
     logger.info(
         "Scheduler started: market data every %dmin, news every %dmin, scout scan every %dmin",
         config.COLLECT_INTERVAL_MINUTES,

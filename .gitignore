@@ -8,3 +8,6 @@ venv/
 models/*.joblib
 models/*.h5
 .DS_Store
+
+# prediction evaluation output (SQLite + generated charts)
+data/

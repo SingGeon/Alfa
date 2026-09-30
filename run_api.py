@@ -17,6 +17,7 @@ from data_collector.jobs import (
     record_prediction_snapshots_job,
     run_all_once,
 )
+from evaluation import jobs as evaluation_jobs
 from scout.scanner import run_scout_scan
 
 app = create_app()
@@ -90,7 +91,10 @@ def _start_market_data_scheduler() -> None:
         kwargs={"interval": "1h", "steps": 24, "max_candidates": 5},
     )
     scheduler.add_job(_run_scout_scan_subprocess, "interval", minutes=config.SCOUT_INTERVAL_MINUTES, id="scout_scan")
+    # Prediction evaluation: real prices every minute, daily overview at 00:05 UTC.
+    evaluation_jobs.register_jobs(scheduler)
     scheduler.start()
+    evaluation_jobs.startup_recovery()
     _market_data_scheduler = scheduler  # keep a reference so it isn't GC'd
     logger.info(
         "Background scheduler started: market data every %dmin, news every %dmin, scout scan every %dmin",

@@ -106,3 +106,19 @@ def synthetic_candles():
         return candles
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def evaluation_data_dir(tmp_path, monkeypatch):
+    """Point the evaluation module's SQLite DB and chart/report folders at a
+    per-test temp dir - api.services.run_prediction logs every prediction
+    there, so without this the test suite would write into the real data/."""
+    import config
+
+    data_dir = tmp_path / "eval_data"
+    monkeypatch.setattr(config, "EVAL_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(config, "EVAL_DB_PATH", str(data_dir / "predictions.db"))
+    monkeypatch.setattr(config, "EVAL_CHARTS_DIR", str(data_dir / "charts"))
+    monkeypatch.setattr(config, "EVAL_DAILY_DIR", str(data_dir / "daily"))
+    monkeypatch.setattr(config, "EVAL_SNAPSHOTS_DIR", str(data_dir / "snapshots"))
+    yield data_dir

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prediction evaluation · ETH Price Predictor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/evaluation.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="/logo.png" alt="ETH Price Predictor">
+    </a>
+    <div class="topbar-actions">
+      <a class="nav-link" href="/dashboard.html">📈 <span data-i18n="nav.dashboard">ETH Dashboard</span></a>
+      <a class="nav-link" href="/history.html">🗓️ <span data-i18n="nav.history">Day history</span></a>
+      <a class="nav-link" href="/visual.html">🖼️ <span data-i18n="nav.visual">Visual history</span></a>
+      <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
+        <button data-lang="en" type="button">EN</button>
+        <button data-lang="ro" type="button">RO</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="eval-intro">
+    <h1 data-i18n="eval.title">Prediction evaluation</h1>
+    <p id="evalSubtitle" class="eval-subtitle"></p>
+  </div>
+
+  <div id="errorBanner" class="error-banner" hidden></div>
+
+  <section class="card">
+    <div class="card-header" data-i18n="eval.summary.header">Per model</div>
+    <div id="summaryGrid" class="eval-summary-grid"></div>
+  </section>
+
+  <section class="card">
+    <div class="eval-table-head">
+      <div class="card-header" data-i18n="eval.table.header">All predictions</div>
+      <a id="csvLink" class="nav-link" href="/api/evaluation/predictions.csv" data-i18n="eval.csv">⬇ Export CSV</a>
+    </div>
+
+    <form id="filters" class="eval-filters" autocomplete="off">
+      <label><span data-i18n="eval.filter.interval">Interval</span>
+        <select name="interval">
+          <option value="" data-i18n="eval.filter.all">All</option>
+          <option>15m</option><option>1h</option><option>4h</option><option>1d</option><option>1w</option>
+        </select>
+      </label>
+      <label><span data-i18n="eval.filter.model">Model</span>
+        <select name="model" id="modelFilter"><option value="" data-i18n="eval.filter.all">All</option></select>
+      </label>
+      <label><span data-i18n="eval.filter.status">Status</span>
+        <select name="status">
+          <option value="" data-i18n="eval.filter.all">All</option>
+          <option value="pending" data-i18n="eval.status.pending">pending</option>
+          <option value="completed" data-i18n="eval.status.completed">completed</option>
+          <option value="expired" data-i18n="eval.status.expired">expired</option>
+        </select>
+      </label>
+      <label><span data-i18n="eval.filter.from">From</span><input type="date" name="date_from"></label>
+      <label><span data-i18n="eval.filter.to">To</span><input type="date" name="date_to"></label>
+      <button type="reset" class="eval-btn" data-i18n="eval.filter.reset">Reset</button>
+    </form>
+
+    <p class="eval-hint" data-i18n="eval.chartHint">Click a row to see its chart.</p>
+
+    <div class="eval-table-scroll">
+      <table class="prediction-table eval-table">
+        <thead>
+          <tr>
+            <th data-sort="created_at" data-i18n="eval.col.created">Created</th>
+            <th data-sort="interval" data-i18n="eval.col.interval">Interval</th>
+            <th data-sort="model_name" data-i18n="eval.col.model">Model</th>
+            <th data-sort="price_at_prediction" class="num" data-i18n="eval.col.priceAt">Price at prediction</th>
+            <th data-sort="predicted_final_price" class="num" data-i18n="eval.col.predicted">Predicted price</th>
+            <th data-sort="actual_final_price" class="num" data-i18n="eval.col.actual">Real price</th>
+            <th data-sort="pct_error" class="num" data-i18n="eval.col.error">Error %</th>
+            <th data-sort="direction_correct" data-i18n="eval.col.direction">Direction correct</th>
+            <th data-sort="status" data-i18n="eval.col.status">Status</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr class="empty-row"><td colspan="9" data-i18n="eval.loading">loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="eval-pager">
+      <button id="prevPage" class="eval-btn" type="button" data-i18n="eval.prev">← Previous</button>
+      <span id="pageInfo"></span>
+      <button id="nextPage" class="eval-btn" type="button" data-i18n="eval.next">Next →</button>
+    </div>
+  </section>
+
+</div>
+
+<dialog id="chartDialog" class="eval-dialog">
+  <form method="dialog"><button class="eval-btn eval-dialog-close" data-i18n="eval.close">Close</button></form>
+  <img id="chartImg" alt="">
+</dialog>
+
+<script src="/i18n.js"></script>
+<script src="/evaluation.js"></script>
+</body>
+</html>

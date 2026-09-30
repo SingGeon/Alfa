@@ -71,3 +71,30 @@ FLASK_DEBUG = _bool("FLASK_DEBUG", False)
 
 # Base URL the frontend dashboard uses to reach the Flask API.
 API_BASE_URL = os.getenv("API_BASE_URL", f"http://localhost:{FLASK_PORT}")
+
+# --- Prediction evaluation (evaluation/) ---
+# SQLite log of every prediction + its real outcome, per-prediction PNG
+# charts and the end-of-day overview images. Relative paths resolve against
+# the project root so it doesn't matter which directory the app starts from.
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+EVAL_DATA_DIR = os.path.join(_PROJECT_ROOT, os.getenv("EVAL_DATA_DIR", "data"))
+EVAL_DB_PATH = os.path.join(EVAL_DATA_DIR, os.getenv("EVAL_DB_FILE", "predictions.db"))
+EVAL_CHARTS_DIR = os.path.join(EVAL_DATA_DIR, "charts")
+EVAL_DAILY_DIR = os.path.join(EVAL_DATA_DIR, "daily")
+# A prediction whose real price still can't be found this many hours after
+# its target candle closed (API outage + a real hole in the data) is marked
+# "expired" instead of staying pending forever.
+EVAL_EXPIRE_HOURS = int(os.getenv("EVAL_EXPIRE_HOURS", "72"))
+# The optional GIF/PDF alongside the daily overview PNG.
+EVAL_DAILY_GIF = _bool("EVAL_DAILY_GIF", True)
+EVAL_DAILY_PDF = _bool("EVAL_DAILY_PDF", True)
+# Visual history: predictions with this many steps get a new row + image
+# every time the forecast actually changes (model retrained), not just once
+# per candle; EVAL_SNAPSHOT_INTERVALS are forecast at that horizon on a
+# timer so the history fills in even with no dashboard open.
+EVAL_SNAPSHOT_STEPS = int(os.getenv("EVAL_SNAPSHOT_STEPS", "24"))
+EVAL_SNAPSHOT_INTERVALS = [s.strip() for s in os.getenv("EVAL_SNAPSHOT_INTERVALS", "1h").split(",") if s.strip()]
+EVAL_SNAPSHOT_EVERY_MINUTES = int(os.getenv("EVAL_SNAPSHOT_EVERY_MINUTES", "5"))
+# How many real candles before the prediction the visual snapshot shows.
+EVAL_SNAPSHOT_HISTORY_CANDLES = int(os.getenv("EVAL_SNAPSHOT_HISTORY_CANDLES", "48"))
+EVAL_SNAPSHOTS_DIR = os.path.join(EVAL_DATA_DIR, "snapshots")

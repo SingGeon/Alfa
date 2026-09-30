@@ -19,7 +19,10 @@ def create_app() -> Flask:
 
     from api.routes import api_bp
 
+    from evaluation.api import evaluation_bp
+
     app.register_blueprint(api_bp, url_prefix="/api")
+    app.register_blueprint(evaluation_bp, url_prefix="/api/evaluation")
 
     @app.get("/")
     def index():

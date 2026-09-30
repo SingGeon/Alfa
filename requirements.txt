@@ -13,6 +13,10 @@ numpy==2.4.6
 scikit-learn==1.5.1
 scipy==1.17.1
 
+# --- Prediction evaluation charts / daily overview ---
+matplotlib==3.11.2
+pillow==10.4.0
+
 # --- NLP ---
 vaderSentiment==3.3.2
 feedparser==6.0.11

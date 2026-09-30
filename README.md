@@ -26,6 +26,7 @@ Combines:
 - [ETH Dashboard](#eth-dashboard)
 - [Scout AI](#scout-ai)
 - [API](#api)
+- [Prediction evaluation](#prediction-evaluation)
 - [Prediction models](#prediction-models)
 - [Performance](#performance)
 - [Tests](#tests)
@@ -66,6 +67,16 @@ scout/
   scanner.py                    # orchestrates a full scan, saves ranked results
   narrative.py                  # per-asset "why and when" text
 
+evaluation/                     # prediction evaluation (see "Prediction evaluation" below)
+  schema.sql                    # SQLite schema of the `predictions` table
+  storage.py                    # SQLite access: log, query/filter/sort/paginate, per-model summary
+  recorder.py                   # the single hook called from api/services.run_prediction
+  evaluator.py                  # fills real prices (Binance -> CoinGecko), errors, completion
+  charts.py                     # per-prediction images: live snapshot + final chart (matplotlib, Agg)
+  daily_report.py               # end-of-day overview PNG (+ GIF, PDF), missed-day recovery
+  jobs.py                       # APScheduler wiring (every minute + 00:05 UTC)
+  api.py                        # /api/evaluation/* blueprint (table, CSV, charts, days)
+
 api/
   routes.py                     # every endpoint (see the table below)
   services.py                   # orchestrates candles + sentiment + BTC + TVL + model -> prediction
@@ -78,6 +89,9 @@ frontend/
     detail.html / detail.css / detail.js        # per-asset detail (chart, prediction, narrative, live price)
     chart-utils.js                              # shared chart helper (app.js + detail.js)
     i18n.js                                     # shared EN/RO i18n runtime (language toggle)
+    evaluation.html / evaluation.css / .js      # prediction evaluation table
+    history.html / history.js                   # day history (daily overviews)
+    visual.html / visual.js                     # visual history (one image per forecast)
 
 tests/                          # pytest, fully offline (mongomock + requests-mock)
 ```
@@ -206,6 +220,96 @@ trains a real model per asset across ~135 assets.
 narrative/note text in the response - `"en"` (default) or `"ro"`; it's pure
 output-language selection over already-computed numbers and never triggers
 a re-prediction.
+
+## Prediction evaluation
+
+Every prediction any model makes (`api.services.run_prediction`: dashboard
+chart, outlook tiles, summary, the recurring snapshot job) is logged to a
+SQLite database, scored against the real Binance price once its target candle
+has closed, and drawn as a PNG. The models themselves are untouched; one call
+at the end of `run_prediction` (`evaluation/recorder.py`) records their output
+and never raises.
+
+**How it runs.** Nothing extra to start: `python run_api.py` (or
+`run_scheduler.py`) registers the jobs on the existing APScheduler:
+
+| Job | When | What |
+|---|---|---|
+| `snapshot_predictions` | every 5 min | 24-step forecast for 1h, both model variants (warm cache, cheap); logged only if it differs from the last one |
+| `evaluate_predictions` | every minute | append every real candle that has closed and redraw that prediction's snapshot; when the last one has closed, compute `abs_error`, `pct_error`, `direction_correct`, set `completed`, draw the final PNG |
+| `daily_evaluation_report` | 00:05 UTC | `data/daily/YYYY-MM-DD_overview.png` (+ `.gif`, `.pdf`) for the day that just ended |
+| startup recovery | on start | finish whatever resolved while the app was down, draw missing charts, build the overviews for any past days that don't have one |
+
+**Storage.** `data/predictions.db`, table `predictions`
+([evaluation/schema.sql](evaluation/schema.sql)). The unique key is
+`(interval, model_name, created_at)`. On top of that, at most one row is kept
+per `(interval, model_name, horizon_steps)` per candle of that interval. The
+dashboard polls `/api/predict` every 30s while the model only retrains every
+~15min, so without this one real forecast would be logged hundreds of times.
+`model_name` is `<backend>-<variant>` (`sklearn-tuned`, `sklearn-legacy`). All
+times are UTC (`YYYY-MM-DDTHH:MM:SSZ`). The browser converts them to the
+viewer's timezone. The date filters are UTC dates.
+
+**Scoring.** A forecast point at timestamp `T` means the close of the candle
+that opens at `T` (the same convention the models train on), so the real
+price for `T` is known at `T + interval`. `target_time` is the last forecast
+candle and `resolved_at = target_time + interval`.
+- `pct_error = (predicted - actual) / actual * 100`, signed: positive means
+  the model was too high.
+- `direction_correct` is true when the model called the same side of
+  `price_at_prediction` (up / down / flat) as reality.
+- If Binance fails after retries, or has a hole for a closed candle, CoinGecko
+  price history fills the gap (last price at or before the candle close).
+- A prediction whose final price is still missing `EVAL_EXPIRE_HOURS` (72h)
+  after `resolved_at` is marked `expired` and left out of the statistics.
+
+**Visual history.** Every logged prediction gets an image drawn like the
+dashboard chart. It shows the last 48 real candles the model saw, then the AI
+forecast (dashed line + confidence band), with the real candles drawn *on top
+of* the forecast as they close. The image is saved to
+`data/snapshots/YYYY-MM-DD/…png` (the day it was made) the moment the
+prediction is logged, and redrawn every minute that new real candles arrive.
+24-step forecasts (`EVAL_SNAPSHOT_STEPS`) get a new row + image every time the
+forecast actually changes (the model retrained into a different answer). A
+repeat of the same forecast is skipped. Other horizons keep one per candle.
+`/visual.html` shows them as a gallery, newest first.
+
+**Charts.** `data/charts/YYYY-MM-DD/{interval}_{model}_{created_at}.png`.
+The date is the day the prediction resolved, so the 00:05 report always finds
+every chart of the day that just ended. Charts are idempotent: an existing
+file is never redrawn.
+
+**Dashboard.** `/evaluation.html` has the per-model summary and the table,
+with filters (interval, model, status, dates), sorting by clicking a column,
+pagination, CSV export, and a click on a completed row to open its chart.
+`/history.html` shows the daily overviews with a date selector.
+`/visual.html` is the visual history gallery.
+
+**API** (`/api/evaluation`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /predictions?interval=&model=&status=&horizon_steps=&date_from=&date_to=&sort=&order=&page=&page_size=` | Table rows + per-model summary (count, mean \|error %\|, direction accuracy %) |
+| `GET /predictions.csv?…same filters…` | Every matching row as CSV |
+| `GET /predictions/<id>/chart.png` | Final chart of one completed prediction |
+| `GET /predictions/<id>/snapshot.png` | Visual snapshot, current state (any status) |
+| `GET /models` | Model names and intervals, for the filters |
+| `GET /days` | Days that have an overview, newest first |
+| `GET /days/<YYYY-MM-DD>` | That day's stats + which files exist |
+| `GET /days/<YYYY-MM-DD>/overview.png\|gif\|pdf` | The daily overview files |
+
+**Settings** (`.env`): `EVAL_DATA_DIR` (default `data`), `EVAL_DB_FILE`
+(`predictions.db`), `EVAL_EXPIRE_HOURS` (72), `EVAL_DAILY_GIF` / `EVAL_DAILY_PDF`
+(both on), `EVAL_SNAPSHOT_STEPS` (24), `EVAL_SNAPSHOT_INTERVALS` (`1h`, comma
+separated), `EVAL_SNAPSHOT_EVERY_MINUTES` (5), `EVAL_SNAPSHOT_HISTORY_CANDLES` (48).
+
+**By hand:**
+
+```bash
+.venv/bin/python -c "from evaluation.evaluator import complete_pending_predictions as f; print(f())"
+.venv/bin/python -c "from evaluation.charts import generate_missing_charts as f; print(f())"
+.venv/bin/python -c "from datetime import date; from evaluation.daily_report import build_daily_report as f; print(f(date(2026, 9, 29), force=True))"
+```
 
 ## Prediction models
 

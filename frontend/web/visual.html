@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visual history · ETH Price Predictor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/evaluation.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="/logo.png" alt="ETH Price Predictor">
+    </a>
+    <div class="topbar-actions">
+      <a class="nav-link" href="/dashboard.html">📈 <span data-i18n="nav.dashboard">ETH Dashboard</span></a>
+      <a class="nav-link" href="/evaluation.html">🎯 <span data-i18n="nav.evaluation">Evaluation</span></a>
+      <a class="nav-link" href="/history.html">🗓️ <span data-i18n="nav.history">Day history</span></a>
+      <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
+        <button data-lang="en" type="button">EN</button>
+        <button data-lang="ro" type="button">RO</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="eval-intro">
+    <h1 data-i18n="visual.title">Visual history</h1>
+    <p id="visualSubtitle" class="eval-subtitle"></p>
+  </div>
+
+  <div id="errorBanner" class="error-banner" hidden></div>
+
+  <section class="card">
+    <form id="filters" class="eval-filters visual-filters" autocomplete="off">
+      <label><span data-i18n="visual.filter.horizon">Horizon</span>
+        <select name="horizon_steps" id="horizonFilter">
+          <option value="24" selected>24</option>
+          <option value="" data-i18n="eval.filter.all">All</option>
+        </select>
+      </label>
+      <label><span data-i18n="eval.filter.interval">Interval</span>
+        <select name="interval">
+          <option value="" data-i18n="eval.filter.all">All</option>
+          <option>15m</option><option>1h</option><option>4h</option><option>1d</option><option>1w</option>
+        </select>
+      </label>
+      <label><span data-i18n="eval.filter.model">Model</span>
+        <select name="model" id="modelFilter"><option value="" data-i18n="eval.filter.all">All</option></select>
+      </label>
+      <label><span data-i18n="eval.filter.from">From</span><input type="date" name="date_from"></label>
+      <label><span data-i18n="eval.filter.to">To</span><input type="date" name="date_to"></label>
+    </form>
+
+    <div id="gallery" class="visual-gallery"></div>
+    <p id="galleryEmpty" class="eval-hint" data-i18n="visual.empty" hidden>No forecasts saved yet.</p>
+
+    <div class="eval-pager">
+      <button id="prevPage" class="eval-btn" type="button" data-i18n="eval.prev">← Previous</button>
+      <span id="pageInfo"></span>
+      <button id="nextPage" class="eval-btn" type="button" data-i18n="eval.next">Next →</button>
+    </div>
+  </section>
+
+</div>
+
+<dialog id="chartDialog" class="eval-dialog">
+  <form method="dialog"><button class="eval-btn eval-dialog-close" data-i18n="eval.close">Close</button></form>
+  <img id="chartImg" alt="">
+</dialog>
+
+<script src="/i18n.js"></script>
+<script src="/visual.js"></script>
+</body>
+</html>

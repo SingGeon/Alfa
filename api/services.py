@@ -17,6 +17,7 @@ from data_collector import market_data
 from data_collector.defillama_client import get_ethereum_tvl_by_date
 from data_collector.http_utils import ExternalAPIError
 from database import repository
+from evaluation.recorder import record_prediction
 from ml.combined_predictor import compute_confidence, generate_narrative_summary
 from ml.features import build_feature_frame
 from ml.price_predictor import _INTERVAL_TIMEDELTA, PricePredictor
@@ -285,6 +286,9 @@ def run_prediction(
         ],
     }
     repository.save_prediction(coin_id, result)
+    # Evaluation log (evaluation/): records what the model said so it can be
+    # scored against the real price later. Never raises.
+    record_prediction(result, df, sentiment_avg)
     return result
 
 
