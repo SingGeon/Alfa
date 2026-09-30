@@ -267,17 +267,36 @@ candle and `resolved_at = target_time + interval`.
 dashboard chart. It shows the last 48 real candles the model saw, then the AI
 forecast (dashed line + confidence band), with the real candles drawn *on top
 of* the forecast as they close. The image is saved to
-`data/snapshots/YYYY-MM-DD/…png` (the day it was made) the moment the
+`data/snapshots/{model}/{interval}/YYYY-MM-DD/…png` (the day it was made) the moment the
 prediction is logged, and redrawn every minute that new real candles arrive.
 24-step forecasts (`EVAL_SNAPSHOT_STEPS`) get a new row + image every time the
 forecast actually changes (the model retrained into a different answer). A
 repeat of the same forecast is skipped. Other horizons keep one per candle.
 `/visual.html` shows them as a gallery, newest first.
 
-**Charts.** `data/charts/YYYY-MM-DD/{interval}_{model}_{created_at}.png`.
+**Charts.** `data/charts/{model}/{interval}/YYYY-MM-DD/{interval}_{model}_{created_at}.png`.
 The date is the day the prediction resolved, so the 00:05 report always finds
 every chart of the day that just ended. Charts are idempotent: an existing
 file is never redrawn.
+
+**Folder layout and stats.** Charts and snapshots are browsable two ways:
+
+```
+data/charts/
+  stats.json, stats.csv                  overall; per model, interval, day and combinations
+  sklearn-tuned/
+    stats.json                           this model: per interval, per day
+    1h/
+      stats.json                         this model + interval: per day
+      2026-09-30/1h_sklearn-tuned_….png
+  by-date/2026-09-30/
+    stats.json                           this day: per model, per model + interval
+    *.png                                links to every model/interval's charts of the day
+```
+
+`data/snapshots/` has the same tree (without stats). The stats files refresh
+every minute with the evaluation job; `GET /api/evaluation/stats` returns the
+same numbers. PNGs from the old flat `YYYY-MM-DD/` layout are moved on startup.
 
 **Dashboard.** `/evaluation.html` has the per-model summary and the table,
 with filters (interval, model, status, dates), sorting by clicking a column,
@@ -294,13 +313,14 @@ pagination, CSV export, and a click on a completed row to open its chart.
 | `GET /predictions/<id>/chart.png` | Final chart of one completed prediction |
 | `GET /predictions/<id>/snapshot.png` | Visual snapshot, current state (any status) |
 | `GET /models` | Model names and intervals, for the filters |
+| `GET /stats` | Accuracy stats: overall, per model / interval / day and their combinations |
 | `GET /days` | Days that have an overview, newest first |
 | `GET /days/<YYYY-MM-DD>` | That day's stats + which files exist |
 | `GET /days/<YYYY-MM-DD>/overview.png\|gif\|pdf` | The daily overview files |
 
 **Settings** (`.env`): `EVAL_DATA_DIR` (default `data`), `EVAL_DB_FILE`
 (`predictions.db`), `EVAL_EXPIRE_HOURS` (72), `EVAL_DAILY_GIF` / `EVAL_DAILY_PDF`
-(both on), `EVAL_SNAPSHOT_STEPS` (24), `EVAL_SNAPSHOT_INTERVALS` (`1h`, comma
+(both on), `EVAL_SNAPSHOT_STEPS` (24), `EVAL_SNAPSHOT_INTERVALS` (`15m,1h,4h,1d,1w`, comma
 separated), `EVAL_SNAPSHOT_EVERY_MINUTES` (5), `EVAL_SNAPSHOT_HISTORY_CANDLES` (48).
 
 **By hand:**

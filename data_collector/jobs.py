@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # whatever interval a browser tab happened to have open at the time, so
 # 15m/1h accuracy history only accumulated by coincidence instead of
 # continuously.
-_PREDICTION_SNAPSHOT_INTERVALS = ("15m", "1h", "1d")
+_PREDICTION_SNAPSHOT_INTERVALS = ("15m", "1h", "4h", "1d", "1w")
 
 # Sklearn is the only backend now (see ml/price_predictor.py's module
 # docstring for why LSTM was removed) - a single-element tuple rather than

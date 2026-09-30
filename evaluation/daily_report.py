@@ -66,7 +66,7 @@ def pdf_path(day: date) -> Path:
 def day_chart_files(day: date) -> list[Path]:
     """This day's chart PNGs, ordered by interval then creation time (both
     read back from the file name: {interval}_{model}_{YYYYmmddTHHMMSSZ}.png)."""
-    folder = Path(config.EVAL_CHARTS_DIR) / day.isoformat()
+    folder = charts.by_date_dir(config.EVAL_CHARTS_DIR, day.isoformat())
     files = [f for f in folder.glob("*.png") if not f.name.endswith(".tmp.png")] if folder.is_dir() else []
 
     def key(f: Path):
@@ -227,7 +227,7 @@ def recover_missing_days(now: datetime | None = None) -> list[date]:
     down at 00:05. Today is left alone: it isn't over."""
     today = (now or datetime.now(timezone.utc)).date()
     days = set(storage.completed_resolved_days())
-    charts_dir = Path(config.EVAL_CHARTS_DIR)
+    charts_dir = Path(config.EVAL_CHARTS_DIR) / charts.BY_DATE_DIR
     if charts_dir.is_dir():
         days.update(date.fromisoformat(d.name) for d in charts_dir.iterdir() if d.is_dir() and _DAY_DIR_RE.match(d.name))
     built = []

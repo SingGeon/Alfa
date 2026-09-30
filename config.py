@@ -93,7 +93,7 @@ EVAL_DAILY_PDF = _bool("EVAL_DAILY_PDF", True)
 # per candle; EVAL_SNAPSHOT_INTERVALS are forecast at that horizon on a
 # timer so the history fills in even with no dashboard open.
 EVAL_SNAPSHOT_STEPS = int(os.getenv("EVAL_SNAPSHOT_STEPS", "24"))
-EVAL_SNAPSHOT_INTERVALS = [s.strip() for s in os.getenv("EVAL_SNAPSHOT_INTERVALS", "1h").split(",") if s.strip()]
+EVAL_SNAPSHOT_INTERVALS = [s.strip() for s in os.getenv("EVAL_SNAPSHOT_INTERVALS", "15m,1h,4h,1d,1w").split(",") if s.strip()]
 EVAL_SNAPSHOT_EVERY_MINUTES = int(os.getenv("EVAL_SNAPSHOT_EVERY_MINUTES", "5"))
 # How many real candles before the prediction the visual snapshot shows.
 EVAL_SNAPSHOT_HISTORY_CANDLES = int(os.getenv("EVAL_SNAPSHOT_HISTORY_CANDLES", "48"))

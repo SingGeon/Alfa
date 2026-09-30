@@ -183,15 +183,13 @@ def _get_trained_model(
         return predictor, df, sentiment_avg, now
 
 
-# The dashboard only ever needs a handful of (coin, interval) combos: the
-# chart's default interval, the two outlook legs, and 15m (tracked by the
-# accuracy chart's interval selector, and by data_collector.jobs's
-# recurring snapshot job - without it here, every snapshot would pay a
-# cold-train instead of hitting the warm cache). Keeping this list small
+# Every interval the evaluation log records on a timer (data_collector.jobs
+# and evaluation.jobs snapshot all of them) - without one here, each of its
+# snapshots would pay a cold-train instead of hitting the warm cache. Keeping this list small
 # and explicit (rather than "whatever was last requested") means warm-up
 # work stays cheap and bounded regardless of how many intervals
 # SUPPORTED_INTERVALS grows to.
-_WARM_UP_INTERVALS = ("15m", "1h", "1d", "1w")
+_WARM_UP_INTERVALS = ("15m", "1h", "4h", "1d", "1w")
 
 # Every backend the model selector can pick (see PREDICTION_BACKENDS) -
 # a single-element tuple now that sklearn is the only backend, kept for

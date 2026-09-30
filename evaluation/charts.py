@@ -4,15 +4,20 @@ the real candles that actually followed drawn *on top of* the forecast, so
 the two can be compared at a glance.
 
 Two files per prediction:
-- the visual snapshot, data/snapshots/YYYY-MM-DD/{interval}_{model}_{created_at}.png
+- the visual snapshot, data/snapshots/{model}/{interval}/YYYY-MM-DD/{interval}_{model}_{created_at}.png
   (date = day the prediction was made). Drawn as soon as the prediction is
   logged and redrawn every time new real candles arrive, so it always shows
   the latest state - this is the visual history.
-- the final chart, data/charts/YYYY-MM-DD/{same name}.png, where the date is
-  the day the prediction *resolved* (its last forecast candle closed, see
-  schema.sql) - so by the time the 00:05 UTC daily report runs, every chart
-  for the day that just ended already exists. Idempotent: an existing file
-  is never redrawn.
+- the final chart, data/charts/{model}/{interval}/YYYY-MM-DD/{same name}.png,
+  where the date is the day the prediction *resolved* (its last forecast
+  candle closed, see schema.sql) - so by the time the 00:05 UTC daily report
+  runs, every chart for the day that just ended already exists. Idempotent:
+  an existing file is never redrawn.
+
+Both trees are browsable two ways: by model -> interval -> day (the real
+files), and by day across every model/interval under by-date/YYYY-MM-DD/
+(relative symlinks to those same files; a copy where symlinks aren't
+supported). evaluation/stats.py writes a stats.json at each level.
 
 Uses matplotlib's object API on an Agg canvas (no pyplot, no GUI) - pyplot
 keeps global state that isn't safe to touch from the scheduler's worker
@@ -22,6 +27,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shutil
 from pathlib import Path
 
 import matplotlib
@@ -50,18 +57,75 @@ FIG_SIZE = (10, 6)
 DPI = 100
 
 
+BY_DATE_DIR = "by-date"
+_DAY_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def model_dir_name(model_name: str) -> str:
+    return "".join(c if c.isalnum() or c in "-." else "-" for c in model_name)
+
+
 def _file_name(pred: dict) -> str:
     created = parse_iso(pred["created_at"]).strftime("%Y%m%dT%H%M%SZ")
-    model = "".join(c if c.isalnum() or c in "-." else "-" for c in pred["model_name"])
-    return f"{pred['interval']}_{model}_{created}.png"
+    return f"{pred['interval']}_{model_dir_name(pred['model_name'])}_{created}.png"
+
+
+def _organized_path(root: str, model_name: str, interval: str, day: str, name: str) -> Path:
+    return Path(root) / model_dir_name(model_name) / interval / day / name
 
 
 def chart_path(pred: dict) -> Path:
-    return Path(config.EVAL_CHARTS_DIR) / pred["resolved_at"][:10] / _file_name(pred)
+    day = pred["resolved_at"][:10]
+    return _organized_path(config.EVAL_CHARTS_DIR, pred["model_name"], pred["interval"], day, _file_name(pred))
 
 
 def snapshot_path(pred: dict) -> Path:
-    return Path(config.EVAL_SNAPSHOTS_DIR) / pred["created_at"][:10] / _file_name(pred)
+    day = pred["created_at"][:10]
+    return _organized_path(config.EVAL_SNAPSHOTS_DIR, pred["model_name"], pred["interval"], day, _file_name(pred))
+
+
+def by_date_dir(root: str, day: str) -> Path:
+    return Path(root) / BY_DATE_DIR / day
+
+
+def _link_by_date(path: Path, root: str) -> None:
+    """Expose `path` (.../{model}/{interval}/{day}/{name}) under
+    by-date/{day}/{name} too."""
+    link = by_date_dir(root, path.parent.name) / path.name
+    if link.is_symlink():
+        return
+    os.makedirs(link.parent, exist_ok=True)
+    try:
+        os.symlink(os.path.relpath(path, link.parent), link)
+    except FileExistsError:
+        shutil.copy2(path, link)  # a copy from an earlier fallback: keep it current
+    except OSError:
+        shutil.copy2(path, link)
+
+
+def organize_existing(root: str) -> int:
+    """One-off migration from the old flat layout ({root}/YYYY-MM-DD/{name})
+    into {root}/{model}/{interval}/YYYY-MM-DD/{name} + by-date links. The
+    model and interval are read back from the file name. Returns how many
+    files were moved."""
+    base = Path(root)
+    if not base.is_dir():
+        return 0
+    moved = 0
+    for day_dir in [d for d in base.iterdir() if d.is_dir() and _DAY_DIR_RE.match(d.name)]:
+        for f in day_dir.glob("*.png"):
+            parts = f.stem.split("_")
+            if f.name.endswith(".tmp.png") or len(parts) != 3:
+                continue
+            interval, model, _ = parts
+            target = _organized_path(root, model, interval, day_dir.name, f.name)
+            os.makedirs(target.parent, exist_ok=True)
+            os.replace(f, target)
+            _link_by_date(target, root)
+            moved += 1
+        if not any(day_dir.iterdir()):
+            day_dir.rmdir()
+    return moved
 
 
 def _draw_candles(ax, candles: list[dict], width: float, alpha: float, zorder: float) -> None:
@@ -177,7 +241,9 @@ def _save(fig: Figure, path: Path) -> Path:
 
 def render_snapshot(pred: dict) -> Path:
     """(Re)draw the visual snapshot with the prediction's current state."""
-    return _save(draw_prediction(pred), snapshot_path(pred))
+    path = _save(draw_prediction(pred), snapshot_path(pred))
+    _link_by_date(path, config.EVAL_SNAPSHOTS_DIR)
+    return path
 
 
 def render_prediction_chart(pred: dict, force: bool = False) -> Path | None:
@@ -188,7 +254,9 @@ def render_prediction_chart(pred: dict, force: bool = False) -> Path | None:
     path = chart_path(pred)
     if path.exists() and not force:
         return path
-    return _save(draw_prediction(pred), path)
+    _save(draw_prediction(pred), path)
+    _link_by_date(path, config.EVAL_CHARTS_DIR)
+    return path
 
 
 def refresh_snapshots(prediction_ids: list[int]) -> int:

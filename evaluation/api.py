@@ -5,6 +5,9 @@
     GET /predictions/<id>/chart.png      final chart (completed only)
     GET /predictions/<id>/snapshot.png   visual snapshot, current state (any status)
     GET /models                 model names, for the filter dropdown
+    GET /stats                  accuracy stats: overall, per model / interval / day and their combinations
+                                (same filters as /predictions)
+    GET /prediction-days        days (UTC) predictions were made on, newest first, with counts
     GET /days                   dates that have a daily overview (newest first)
     GET /days/<YYYY-MM-DD>      that day's stats + which files exist
     GET /days/<YYYY-MM-DD>/overview.png | .gif | .pdf
@@ -22,7 +25,7 @@ from datetime import date
 
 from flask import Blueprint, Response, abort, jsonify, request, send_file
 
-from evaluation import charts, daily_report, storage
+from evaluation import charts, daily_report, stats, storage
 
 evaluation_bp = Blueprint("evaluation", __name__)
 
@@ -125,6 +128,22 @@ def predictions_csv():
         mimetype="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=predictions.csv"},
     )
+
+
+@evaluation_bp.get("/stats")
+def get_stats():
+    filters = _filters()
+    body = stats.compute_stats(filters)
+    # The day a prediction was made (the visual history's grouping), next
+    # to by_day's day it resolved (the chart folders' grouping).
+    body["by_created_day"] = storage.grouped_stats(("created_day",), filters)
+    return jsonify(body)
+
+
+@evaluation_bp.get("/prediction-days")
+def get_prediction_days():
+    rows = storage.grouped_stats(("created_day",), _filters())
+    return jsonify({"days": [{"day": r["created_day"], "predictions": r["predictions"]} for r in reversed(rows)]})
 
 
 @evaluation_bp.get("/predictions/<int:prediction_id>/chart.png")

@@ -343,3 +343,60 @@ def all_completed() -> list[dict]:
     with connect() as conn:
         rows = conn.execute("SELECT * FROM predictions WHERE status = 'completed' ORDER BY created_at").fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+_STATS_GROUP_COLUMNS = {
+    "model": "model_name",
+    "interval": "interval",
+    # Same day that decides a prediction's chart folder (see schema.sql).
+    "day": "substr(resolved_at, 1, 10)",
+    # The day it was made - what the visual history groups by.
+    "created_day": "substr(created_at, 1, 10)",
+}
+
+
+def grouped_stats(group_by: tuple[str, ...] = (), filters: dict | None = None) -> list[dict]:
+    """Accuracy stats grouped by any of _STATS_GROUP_COLUMNS (none = one
+    overall row), over the predictions matching `filters` (same as
+    query_predictions). Errors/direction are over completed predictions
+    only; mean_pct_error is signed (positive = the model predicted too high)."""
+    cols = [f"{_STATS_GROUP_COLUMNS[k]} AS {k}" for k in group_by]
+    group = f" GROUP BY {', '.join(group_by)} ORDER BY {', '.join(group_by)}" if group_by else ""
+    where, params = _where(filters or {})
+    with connect() as conn:
+        rows = conn.execute(
+            f"""SELECT {''.join(c + ', ' for c in cols)}
+                       COUNT(*) AS predictions,
+                       SUM(status = 'completed') AS completed,
+                       SUM(status = 'pending') AS pending,
+                       SUM(status = 'expired') AS expired,
+                       AVG(CASE WHEN status = 'completed' THEN ABS(pct_error) END) AS mean_abs_pct_error,
+                       AVG(CASE WHEN status = 'completed' THEN pct_error END) AS mean_pct_error,
+                       AVG(CASE WHEN status = 'completed' THEN abs_error END) AS mean_abs_error_usd,
+                       AVG(CASE WHEN status = 'completed' THEN direction_correct END) AS direction_accuracy,
+                       MIN(created_at) AS first_prediction,
+                       MAX(created_at) AS last_prediction
+                FROM predictions{where}{group}""",
+            params,
+        ).fetchall()
+
+    def rnd(v, n):
+        return round(v, n) if v is not None else None
+
+    return [
+        {
+            **{k: r[k] for k in group_by},
+            "predictions": r["predictions"],
+            "completed": r["completed"] or 0,
+            "pending": r["pending"] or 0,
+            "expired": r["expired"] or 0,
+            "mean_abs_pct_error": rnd(r["mean_abs_pct_error"], 3),
+            "mean_pct_error": rnd(r["mean_pct_error"], 3),
+            "mean_abs_error_usd": rnd(r["mean_abs_error_usd"], 2),
+            "direction_accuracy_pct": rnd(r["direction_accuracy"] * 100 if r["direction_accuracy"] is not None else None, 1),
+            "first_prediction": r["first_prediction"],
+            "last_prediction": r["last_prediction"],
+        }
+        for r in rows
+        if r["predictions"]
+    ]

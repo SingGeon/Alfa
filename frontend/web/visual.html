@@ -36,30 +36,43 @@
   <div id="errorBanner" class="error-banner" hidden></div>
 
   <section class="card">
-    <form id="filters" class="eval-filters visual-filters" autocomplete="off">
-      <label><span data-i18n="visual.filter.horizon">Horizon</span>
-        <select name="horizon_steps" id="horizonFilter">
+    <div class="card-header" data-i18n="visual.stats.overall">General statistics</div>
+    <div id="overallStats" class="vis-stats"></div>
+  </section>
+
+  <section class="card">
+    <div class="vis-controls">
+      <div class="vis-tabs" id="viewTabs" role="tablist">
+        <button type="button" data-view="model" data-i18n="visual.view.model">By model</button>
+        <button type="button" data-view="day" data-i18n="visual.view.day">By day</button>
+      </div>
+      <label class="vis-horizon"><span data-i18n="visual.filter.horizon">Horizon</span>
+        <select id="horizonFilter">
           <option value="24" selected>24</option>
           <option value="" data-i18n="eval.filter.all">All</option>
         </select>
       </label>
-      <label><span data-i18n="eval.filter.interval">Interval</span>
-        <select name="interval">
-          <option value="" data-i18n="eval.filter.all">All</option>
-          <option>15m</option><option>1h</option><option>4h</option><option>1d</option><option>1w</option>
-        </select>
-      </label>
-      <label><span data-i18n="eval.filter.model">Model</span>
-        <select name="model" id="modelFilter"><option value="" data-i18n="eval.filter.all">All</option></select>
-      </label>
-      <label><span data-i18n="eval.filter.from">From</span><input type="date" name="date_from"></label>
-      <label><span data-i18n="eval.filter.to">To</span><input type="date" name="date_to"></label>
-    </form>
+    </div>
 
-    <div id="gallery" class="visual-gallery"></div>
+    <div id="modelNav">
+      <div class="vis-nav-row"><span class="vis-nav-label" data-i18n="eval.filter.model">Model</span><div class="vis-tabs" id="modelTabs"></div></div>
+      <div class="vis-nav-row"><span class="vis-nav-label" data-i18n="eval.filter.interval">Interval</span><div class="vis-tabs" id="intervalTabs"></div></div>
+    </div>
+    <div id="dayNav" hidden>
+      <div class="vis-nav-row"><span class="vis-nav-label" data-i18n="visual.day">Day</span><div class="vis-tabs vis-tabs-scroll" id="dayTabs"></div></div>
+      <p class="eval-hint" data-i18n="visual.dayHint">Days are in UTC.</p>
+    </div>
+
+    <div class="vis-selection">
+      <div class="vis-selection-title" id="selectionTitle"></div>
+      <div id="selectionStats" class="vis-stats"></div>
+      <div id="breakdown" class="vis-breakdown"></div>
+    </div>
+
+    <div id="gallery"></div>
     <p id="galleryEmpty" class="eval-hint" data-i18n="visual.empty" hidden>No forecasts saved yet.</p>
 
-    <div class="eval-pager">
+    <div class="eval-pager" id="pager">
       <button id="prevPage" class="eval-btn" type="button" data-i18n="eval.prev">← Previous</button>
       <span id="pageInfo"></span>
       <button id="nextPage" class="eval-btn" type="button" data-i18n="eval.next">Next →</button>

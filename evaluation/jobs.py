@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 import config
-from evaluation import charts, daily_report, evaluator
+from evaluation import charts, daily_report, evaluator, stats
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ def evaluate_and_chart_job() -> None:
         # New real candles -> redraw those snapshots on top of their forecast.
         charts.refresh_snapshots(result["updated_ids"])
         drawn = charts.generate_missing_charts(result["completed_ids"]) if result["completed_ids"] else 0
+        stats.write_stats_files()
         if result["completed"] or result["expired"]:
             logger.info(
                 "Evaluation: %d updated, %d completed, %d expired, %d charts drawn",
@@ -62,9 +63,15 @@ def startup_recovery() -> None:
     """Complete whatever resolved while the app was down, draw any charts
     that are missing, then build the overviews of days that never got one."""
     try:
+        # Files drawn before the model/interval/day layout existed.
+        for root in (config.EVAL_CHARTS_DIR, config.EVAL_SNAPSHOTS_DIR):
+            moved = charts.organize_existing(root)
+            if moved:
+                logger.info("Moved %d evaluation PNGs in %s into the model/interval/day layout", moved, root)
         result = evaluator.complete_pending_predictions()
         charts.refresh_snapshots(result["updated_ids"])
         drawn = charts.generate_missing_charts()
+        stats.write_stats_files()
         built = daily_report.recover_missing_days()
         if drawn or built:
             logger.info("Evaluation recovery: %d charts drawn, daily reports built for %s", drawn, built)

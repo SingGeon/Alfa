@@ -4,6 +4,7 @@ requests_mock stands in for Binance/CoinGecko, and conftest's
 evaluation_data_dir fixture points the SQLite DB and output folders at a
 per-test temp dir."""
 from datetime import date, datetime, timedelta, timezone
+import json
 import re
 
 import pytest
@@ -12,7 +13,7 @@ from PIL import Image
 import config
 from api import create_app
 from database import repository
-from evaluation import charts, daily_report, evaluator, storage
+from evaluation import charts, daily_report, evaluator, stats, storage
 from evaluation.storage import to_iso
 
 BINANCE_KLINES = re.compile(r"https://api\.binance\.com/api/v3/klines")
@@ -179,7 +180,10 @@ def test_chart_png_generated_with_expected_path_and_size(requests_mock):
     path = charts.render_prediction_chart(pred)
     assert path == charts.chart_path(pred)
     assert path.parent.name == "2026-09-29"  # resolved day
+    assert path.parent.parent.name == "1h" and path.parent.parent.parent.name == "sklearn-tuned"
     assert path.name == "1h_sklearn-tuned_20260929T100000Z.png"
+    by_date = charts.by_date_dir(config.EVAL_CHARTS_DIR, "2026-09-29") / path.name
+    assert by_date.resolve() == path.resolve()
     with Image.open(path) as img:
         assert img.format == "PNG"
         assert img.size == (1000, 600)
@@ -356,7 +360,9 @@ def test_snapshot_drawn_for_pending_and_redrawn_as_real_candles_arrive(requests_
     pred = storage.get_prediction(pid)
     assert len(pred["history_path"]) == 6
     path = charts.render_snapshot(pred)
-    assert path.parent.parent.name == "snapshots" and path.parent.name == "2026-09-29"
+    assert path.parent.name == "2026-09-29"  # created day
+    assert path.parent.parent.name == "1h" and path.parent.parent.parent.name == "sklearn-tuned"
+    assert (charts.by_date_dir(config.EVAL_SNAPSHOTS_DIR, "2026-09-29") / path.name).resolve() == path.resolve()
     first_bytes = path.read_bytes()
 
     requests_mock.get(BINANCE_KLINES, json=[_kline(T0 + timedelta(hours=1), 3004.0)])
@@ -399,3 +405,59 @@ def test_old_database_gets_history_column(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "EVAL_DB_PATH", str(db))
     assert _log() is not None
     assert storage.get_prediction(1)["history_path"] == []
+
+
+# --- folder layout + stats --------------------------------------------------
+
+def test_organize_existing_moves_flat_layout(tmp_path):
+    root = tmp_path / "charts"
+    old = root / "2026-09-29" / "4h_sklearn-legacy_20260929T100000Z.png"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"png")
+    assert charts.organize_existing(str(root)) == 1
+    new = root / "sklearn-legacy" / "4h" / "2026-09-29" / old.name
+    assert new.read_bytes() == b"png"
+    assert (root / charts.BY_DATE_DIR / "2026-09-29" / old.name).read_bytes() == b"png"
+    assert not (root / "2026-09-29").exists()
+    assert charts.organize_existing(str(root)) == 0  # idempotent
+
+
+def test_stats_files_at_every_level(requests_mock):
+    _complete_several(requests_mock)
+    _log(created_at=T0 + timedelta(hours=1), interval="1h", model="sklearn-legacy")  # still pending
+    assert stats.write_stats_files() > 0
+    root = charts.Path(config.EVAL_CHARTS_DIR)
+
+    overall = json.loads((root / "stats.json").read_text())["overall"]
+    assert overall["predictions"] == 4 and overall["completed"] == 3 and overall["pending"] == 1
+
+    tuned = json.loads((root / "sklearn-tuned" / "stats.json").read_text())
+    assert tuned["overall"]["completed"] == 2
+    assert sorted(r["interval"] for r in tuned["by_interval"]) == ["15m", "1h"]
+
+    cell = json.loads((root / "sklearn-tuned" / "1h" / "stats.json").read_text())
+    assert cell["overall"]["completed"] == 1 and cell["by_day"][0]["day"] == "2026-09-29"
+
+    day = json.loads((root / charts.BY_DATE_DIR / "2026-09-29" / "stats.json").read_text())
+    assert {r["model"] for r in day["by_model"]} == {"sklearn-tuned", "sklearn-legacy"}
+
+    assert "sklearn-tuned,1h," in (root / "stats.csv").read_text()
+    assert stats.write_stats_files() == 0  # unchanged -> nothing rewritten
+
+
+def test_stats_endpoint(client, requests_mock):
+    _complete_several(requests_mock)
+    body = client.get("/api/evaluation/stats").json
+    assert body["overall"]["completed"] == 3
+    assert {(r["model"], r["interval"]) for r in body["by_model_interval"]} == {
+        ("sklearn-legacy", "15m"), ("sklearn-tuned", "15m"), ("sklearn-tuned", "1h"),
+    }
+
+
+def test_stats_endpoint_filters_and_prediction_days(client, requests_mock):
+    _complete_several(requests_mock)
+    body = client.get("/api/evaluation/stats?model=sklearn-tuned&interval=15m").json
+    assert body["overall"]["predictions"] == 1
+    assert [r["created_day"] for r in body["by_created_day"]] == ["2026-09-29"]
+    days = client.get("/api/evaluation/prediction-days").json["days"]
+    assert days == [{"day": "2026-09-29", "predictions": 3}]
