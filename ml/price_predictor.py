@@ -29,6 +29,7 @@ The backend implements:
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from datetime import timedelta
 
@@ -116,6 +117,33 @@ _LEGACY_GBR_PARAMS: dict = {}
 
 _GBR_PARAMS_BY_VARIANT = {"tuned": _TUNED_GBR_PARAMS, "legacy": _LEGACY_GBR_PARAMS}
 
+# --- Confidence band calibration --------------------------------------------
+#
+# Measured on a walk-forward backtest (ml/walk_forward.py), the raw quantile
+# band ([alpha=0.1, alpha=0.9] GBR models, re-evaluated on every synthetic
+# candle of the recursive forecast) held the real price only ~26% of the time
+# over 24 steps, against the 80% it is meant to. Three reasons, all fixed below:
+#  - quantile models under-cover out of sample -> split-conformal correction
+#    (CQR, Romano et al. 2019): fit the quantile models on the older 75% of
+#    rows, measure how far the newest 25% fall outside, widen by that amount;
+#  - each step's band was one step wide around the previous *prediction*, so
+#    it never grew with the horizon -> half-width grows as k ** exponent;
+#  - past step 1 the quantile models only ever see synthetic candles (whose
+#    volatility_24 collapses toward 0), so their width shrinks -> the per-step
+#    width is frozen at step 1, the only one computed on real candles.
+_BAND_ALPHA = 0.2            # 1 - target coverage of [lower, upper]
+_CQR_MIN_ROWS = 120          # below this, too few calibration rows - skip CQR
+_CQR_CALIBRATION_FRACTION = 0.25
+# 80% band half-width of real k-step ETH log returns grows as k ** e. Measured
+# (not fitted per model: that was too noisy) on real Binance candles: 1h 0.55,
+# 1d 0.57 (stable across both halves of each history). Plain random-walk
+# scaling would be 0.5; crypto's fatter tails over longer horizons push it up.
+BAND_HORIZON_EXPONENT = 0.57
+# Everything above (CQR, horizon-scaled band, taker_buy_volume carried through
+# the recursion) applies to "tuned" only. "legacy" is kept exactly as it was
+# before, as the fixed reference the tuned model is compared against.
+_CALIBRATED_VARIANTS = ("tuned",)
+
 
 class PricePredictor:
     def __init__(
@@ -134,6 +162,8 @@ class PricePredictor:
         self._models = []          # ensemble of mean predictors (sklearn backend)
         self._models_lower = []    # ensemble of lower-quantile predictors
         self._models_upper = []    # ensemble of upper-quantile predictors
+        self._cqr_q = 0.0           # conformal widening of the quantile band (log-return units)
+        self._cqr_calibration_rows = 0  # rows the widening was measured on (0 = skipped)
         self._model = None          # single-model backends (prophet)
         self._last_close = None
         self._fitted = False
@@ -204,23 +234,46 @@ class PricePredictor:
         seeds = _ENSEMBLE_SEEDS[: self.ensemble_size]
         gbr_params = _GBR_PARAMS_BY_VARIANT[self.model_variant]
         self._models = [GradientBoostingRegressor(random_state=s, **gbr_params).fit(X, y) for s in seeds]
+
+        # Conformalized quantile regression (see _BAND_ALPHA's comment): the
+        # quantile models train on the older rows only, so the newest rows
+        # (in time order - never shuffled) are an honest out-of-sample check
+        # of how far reality lands outside their band.
+        calibrated = self.model_variant in _CALIBRATED_VARIANTS
+        if calibrated and len(X) >= _CQR_MIN_ROWS:
+            split = int(len(X) * (1 - _CQR_CALIBRATION_FRACTION))
+            X_fit, y_fit, X_cal, y_cal = X.iloc[:split], y.iloc[:split], X.iloc[split:], y.iloc[split:]
+        else:
+            X_fit, y_fit, X_cal, y_cal = X, y, None, None
+        low_alpha, high_alpha = (_BAND_ALPHA / 2, 1 - _BAND_ALPHA / 2) if calibrated else (0.1, 0.9)
         self._models_lower = [
-            GradientBoostingRegressor(loss="quantile", alpha=0.1, random_state=s, **gbr_params).fit(X, y)
+            GradientBoostingRegressor(loss="quantile", alpha=low_alpha, random_state=s, **gbr_params).fit(X_fit, y_fit)
             for s in seeds
         ]
         self._models_upper = [
-            GradientBoostingRegressor(loss="quantile", alpha=0.9, random_state=s, **gbr_params).fit(X, y)
+            GradientBoostingRegressor(loss="quantile", alpha=high_alpha, random_state=s, **gbr_params).fit(X_fit, y_fit)
             for s in seeds
         ]
+        self._cqr_q = 0.0
+        self._cqr_calibration_rows = 0 if X_cal is None else len(X_cal)
+        if X_cal is not None:
+            lo = np.mean([m.predict(X_cal) for m in self._models_lower], axis=0)
+            hi = np.mean([m.predict(X_cal) for m in self._models_upper], axis=0)
+            scores = np.maximum(lo - y_cal.to_numpy(), y_cal.to_numpy() - hi)
+            n = len(scores)
+            level = min(1.0, math.ceil((n + 1) * (1 - _BAND_ALPHA)) / n)
+            self._cqr_q = float(np.quantile(scores, level, method="higher"))
 
     def _predict_sklearn(self, df: pd.DataFrame, steps: int, interval: str) -> list[dict]:
-        def step_fn(history: pd.DataFrame) -> tuple[float, float, float] | None:
+        def step_fn(history: pd.DataFrame, with_band: bool) -> tuple[float, float, float] | None:
             row = history.iloc[[-1]][self.feature_cols]
             if row.isna().any(axis=None):
                 return None
             log_return = float(np.mean([m.predict(row)[0] for m in self._models]))
-            log_return_low = float(np.mean([m.predict(row)[0] for m in self._models_lower]))
-            log_return_high = float(np.mean([m.predict(row)[0] for m in self._models_upper]))
+            if not with_band:
+                return log_return, log_return, log_return
+            log_return_low = float(np.mean([m.predict(row)[0] for m in self._models_lower])) - self._cqr_q
+            log_return_high = float(np.mean([m.predict(row)[0] for m in self._models_upper])) + self._cqr_q
             return log_return, log_return_low, log_return_high
 
         return self._iterate_recursive(df, steps, interval, step_fn)
@@ -242,10 +295,21 @@ class PricePredictor:
         df: pd.DataFrame,
         steps: int,
         interval: str,
-        step_fn: Callable[[pd.DataFrame], tuple[float, float, float] | None],
+        step_fn: Callable[[pd.DataFrame, bool], tuple[float, float, float] | None],
     ) -> list[dict]:
+        """Band: step_fn's [low, high] is only asked for at step 1 (real
+        candles). Its distance below/above the point is then held fixed and
+        scaled by k ** BAND_HORIZON_EXPONENT around the cumulative forecast
+        at step k, so the band widens with the horizon and always contains
+        the point."""
         step_delta = _INTERVAL_TIMEDELTA[interval]
-        history = add_technical_features(df[["open", "high", "low", "close", "volume"]].copy())
+        calibrated = self.model_variant in _CALIBRATED_VARIANTS
+        # taker_buy_volume is carried along so taker_buy_ratio keeps its real
+        # values on real candles (it used to be dropped here, which turned the
+        # feature into a constant 0.5 at predict time only).
+        carried = ("open", "high", "low", "close", "volume", "taker_buy_volume") if calibrated else ("open", "high", "low", "close", "volume")
+        ohlcv = [c for c in carried if c in df.columns]
+        history = add_technical_features(df[ohlcv].copy())
         # None of sentiment/btc_return_1/tvl_momentum extrapolate from OHLCV
         # alone (they come from merge_sentiment/merge_btc_returns/
         # merge_defi_tvl in build_feature_frame, which this recursive
@@ -261,23 +325,35 @@ class PricePredictor:
 
         results = []
         last_timestamp = history.index[-1]
-        for _ in range(steps):
-            step = step_fn(history)
+        origin_close = float(history["close"].iloc[-1])
+        cumulative = 0.0
+        below = above = 0.0
+        for k in range(1, steps + 1):
+            step = step_fn(history, k == 1 or not calibrated)
             if step is None:
                 # Not enough rolling history yet (e.g. right at the start) - stop early
                 # rather than feeding the model garbage.
                 logger.warning("Insufficient rolling history for a further step, stopping early")
                 break
             log_return, log_return_low, log_return_high = step
+            if k == 1:
+                # max(0, ...) keeps the point inside the band even if the
+                # quantile models disagree with the mean model.
+                below = max(0.0, log_return - min(log_return_low, log_return_high))
+                above = max(0.0, max(log_return_low, log_return_high) - log_return)
 
             last_close = float(history["close"].iloc[-1])
             predicted_price = last_close * np.exp(log_return)
-            # Including log_return itself in the min/max (not just the two
-            # quantile bounds) guarantees the point estimate always falls
-            # inside [lower, upper] - true by construction for sklearn's
-            # same-distribution quantile models.
-            lower = last_close * np.exp(min(log_return_low, log_return_high, log_return))
-            upper = last_close * np.exp(max(log_return_low, log_return_high, log_return))
+            cumulative += log_return
+            if calibrated:
+                growth = k ** BAND_HORIZON_EXPONENT
+                lower = origin_close * np.exp(cumulative - below * growth)
+                upper = origin_close * np.exp(cumulative + above * growth)
+            else:
+                # legacy: one-step band around the previous (predicted) close,
+                # point estimate included so it always falls inside.
+                lower = last_close * np.exp(min(log_return_low, log_return_high, log_return))
+                upper = last_close * np.exp(max(log_return_low, log_return_high, log_return))
 
             last_timestamp = last_timestamp + step_delta
             results.append(
@@ -299,8 +375,10 @@ class PricePredictor:
                 "volume": history["volume"].iloc[-1],
                 "sentiment": last_sentiment,
             }
+            if "taker_buy_volume" in history.columns:
+                new_row["taker_buy_volume"] = 0.5 * new_row["volume"]  # neutral: no buy/sell lean
             history = pd.concat([history, pd.DataFrame([new_row], index=[last_timestamp])])
-            history = add_technical_features(history[["open", "high", "low", "close", "volume"]])
+            history = add_technical_features(history[ohlcv])
             history["sentiment"] = history["sentiment"] if "sentiment" in history else last_sentiment
             history.loc[last_timestamp, "sentiment"] = last_sentiment
             history["btc_return_1"] = history["btc_return_1"] if "btc_return_1" in history else last_btc_return

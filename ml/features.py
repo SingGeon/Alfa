@@ -34,6 +34,27 @@ FEATURE_COLUMNS = [
 ]
 
 
+# FEATURE_COLUMNS with every price-level feature swapped for its scale-free
+# counterpart (see add_technical_features).
+RELATIVE_FEATURE_COLUMNS = [
+    "return_1",
+    "close_vs_sma_6",
+    "close_vs_sma_24",
+    "close_vs_ema_12",
+    "rsi_14",
+    "volatility_24",
+    "macd_rel",
+    "macd_signal_rel",
+    "bb_position",
+    "volume_ratio",
+    "taker_buy_ratio",
+    "btc_return_1",
+    "tvl_momentum",
+    *[f"return_{n}_back" for n in LAG_STEPS],
+    "sentiment",
+]
+
+
 def candles_to_dataframe(candles: list[dict]) -> pd.DataFrame:
     """Sort candles chronologically and index by timestamp."""
     if not candles:
@@ -95,6 +116,18 @@ def add_technical_features(df: pd.DataFrame) -> pd.DataFrame:
 
     for n in LAG_STEPS:
         df[f"lag_{n}"] = df["close"].shift(n)
+
+    # Scale-free versions of the price-level features above (close, SMAs,
+    # EMA, MACD, lags are all in dollars, i.e. non-stationary - a tree
+    # can't extrapolate past the price range it trained on). Same
+    # information, expressed relative to the current close.
+    df["close_vs_sma_6"] = df["close"] / df["sma_6"] - 1
+    df["close_vs_sma_24"] = df["close"] / df["sma_24"] - 1
+    df["close_vs_ema_12"] = df["close"] / df["ema_12"] - 1
+    df["macd_rel"] = df["macd"] / df["close"]
+    df["macd_signal_rel"] = df["macd_signal"] / df["close"]
+    for n in LAG_STEPS:
+        df[f"return_{n}_back"] = df["close"] / df[f"lag_{n}"] - 1
     return df
 
 

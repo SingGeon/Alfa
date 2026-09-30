@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import pandas as pd
 
@@ -95,3 +96,78 @@ def test_predictor_unknown_backend_raises():
         pass
 
 
+
+
+# --- confidence band calibration (see ml/price_predictor.py) -----------------
+
+def _fitted_forecast(synthetic_candles, n=300, steps=24):
+    df = build_feature_frame(synthetic_candles(n))
+    predictor = PricePredictor(backend="sklearn", model_variant="tuned").fit(df.dropna())
+    return predictor, predictor.predict(df, steps=steps, interval="1h")
+
+
+def test_band_widens_with_horizon(synthetic_candles):
+    _, out = _fitted_forecast(synthetic_candles)
+    widths = [np.log(p["upper"] / p["lower"]) for p in out]
+    assert all(b > a for a, b in zip(widths, widths[1:]))
+    # half-width grows as k ** BAND_HORIZON_EXPONENT from the step-1 width
+    from ml.price_predictor import BAND_HORIZON_EXPONENT
+
+    assert widths[-1] / widths[0] == pytest.approx(24 ** BAND_HORIZON_EXPONENT, rel=1e-6)
+
+
+def test_point_always_inside_band(synthetic_candles):
+    _, out = _fitted_forecast(synthetic_candles)
+    for p in out:
+        assert p["lower"] <= p["predicted_price"] <= p["upper"]
+
+
+def test_conformal_calibration_runs_on_long_history(synthetic_candles):
+    predictor, _ = _fitted_forecast(synthetic_candles, n=300, steps=1)
+    assert predictor._cqr_calibration_rows > 0
+
+
+def test_conformal_calibration_skipped_on_short_history(synthetic_candles):
+    # 130 candles -> ~105 training rows after the 24-candle rolling warm-up: < 120
+    predictor, out = _fitted_forecast(synthetic_candles, n=130, steps=3)
+    assert predictor._cqr_calibration_rows == 0
+    assert predictor._cqr_q == 0.0
+    assert len(out) == 3
+
+
+def test_taker_buy_ratio_stays_real_in_recursion(synthetic_candles):
+    candles = synthetic_candles(200)
+    for i, c in enumerate(candles):
+        c["taker_buy_volume"] = c["volume"] * (0.3 if i % 2 else 0.7)
+    df = build_feature_frame(candles)
+    real_last_ratio = df["taker_buy_ratio"].iloc[-1]
+    assert real_last_ratio != 0.5
+
+    predictor = PricePredictor(backend="sklearn", ensemble_size=1).fit(df.dropna())
+    seen = []
+
+    class Spy:
+        def __init__(self, model):
+            self.model = model
+
+        def predict(self, row):
+            seen.append(float(row["taker_buy_ratio"].iloc[0]))
+            return self.model.predict(row)
+
+    predictor._models = [Spy(m) for m in predictor._models]
+    predictor.predict(df, steps=3, interval="1h")
+    assert seen[0] == pytest.approx(real_last_ratio)  # step 1: the real candle's own value
+    assert seen[1] == pytest.approx(0.5)              # synthetic candles: neutral
+
+
+def test_legacy_variant_keeps_uncalibrated_band(synthetic_candles):
+    # "legacy" is the fixed reference: no CQR, no horizon-scaled band.
+    df = build_feature_frame(synthetic_candles(300))
+    predictor = PricePredictor(backend="sklearn", model_variant="legacy").fit(df.dropna())
+    out = predictor.predict(df, steps=24, interval="1h")
+    assert predictor._cqr_calibration_rows == 0
+    assert predictor._cqr_q == 0.0
+    widths = [np.log(p["upper"] / p["lower"]) for p in out]
+    from ml.price_predictor import BAND_HORIZON_EXPONENT
+
+    assert widths[-1] / widths[0] != pytest.approx(24 ** BAND_HORIZON_EXPONENT, rel=1e-3)
