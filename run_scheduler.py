@@ -1,7 +1,12 @@
 """Standalone scheduler process: periodically refreshes market data and news.
 
-Run alongside the Flask API + dashboard (`python run_api.py`), e.g. in
-separate terminals/containers:
+`run_api.py` now runs this same collection loop in-process on startup, so
+for a normal single-instance run you only ever need:
+    python run_api.py
+
+This standalone process is still here for anyone deliberately running
+collection separately from the API (e.g. multiple API workers that should
+share one collector instead of each duplicating the work):
     python run_scheduler.py
 """
 import logging
@@ -10,7 +15,13 @@ import threading
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 import config
-from data_collector.jobs import collect_market_data_job, collect_news_job, run_all_once
+from data_collector.jobs import (
+    backfill_signal_history,
+    collect_market_data_job,
+    collect_news_job,
+    record_prediction_snapshots_job,
+    run_all_once,
+)
 from scout.scanner import run_scout_scan
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -43,6 +54,23 @@ def main() -> None:
         "interval",
         minutes=config.NEWS_INTERVAL_MINUTES,
         id="collect_news",
+    )
+    # Mirrors run_api.py's in-process scheduler - without this, the accuracy
+    # charts (predicted-vs-actual) only gain new points by coincidence of a
+    # browser polling /api/predict, which is exactly the gap this job was
+    # added to close (see data_collector/jobs.py's record_prediction_snapshots_job).
+    scheduler.add_job(
+        record_prediction_snapshots_job,
+        "interval",
+        minutes=config.COLLECT_INTERVAL_MINUTES,
+        id="record_prediction_snapshots",
+    )
+    scheduler.add_job(
+        backfill_signal_history,
+        "interval",
+        minutes=config.COLLECT_INTERVAL_MINUTES,
+        id="backfill_signal_history",
+        kwargs={"interval": "1h", "steps": 24, "max_candidates": 5},
     )
     scheduler.add_job(
         run_scout_scan,

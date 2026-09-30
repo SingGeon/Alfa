@@ -49,4 +49,13 @@ def _ensure_indexes(db) -> None:
     db.news.create_index([("url", 1)], unique=True)
     db.news.create_index([("published_at", -1)])
     db.predictions.create_index([("coin_id", 1), ("created_at", -1)])
+    # Backs get_prediction_accuracy_series's $match (coin_id + interval +
+    # created_at range) - without `interval` in the index, that query can
+    # only narrow by coin_id+created_at and then filter interval per
+    # document, which gets slower as this collection grows (every /api/predict,
+    # /api/outlook and /api/summary call inserts a new prediction document
+    # on every dashboard refresh, so this is one of the fastest-growing
+    # collections in the app - already tens of thousands of rows after a
+    # couple of days of normal use).
+    db.predictions.create_index([("coin_id", 1), ("interval", 1), ("created_at", -1)])
     db.scout_results.create_index([("asset_type", 1), ("score", -1)])

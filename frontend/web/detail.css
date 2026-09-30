@@ -1,4 +1,4 @@
-.app { gap: 16px; }
+.app { gap: 18px; }
 
 .narrative-card,
 .news-card {
@@ -15,7 +15,7 @@
 }
 
 .pin-toggle-btn.pinned {
-  background: rgba(230, 178, 44, 0.15);
-  border-color: rgba(230, 178, 44, 0.4);
+  background: rgba(242, 169, 60, 0.15);
+  border-color: rgba(242, 169, 60, 0.4);
   color: var(--warning);
 }

@@ -7,12 +7,12 @@ const API_BASE = "";
 const DEFAULT_HISTORY_LIMIT = 1000;
 
 const RANGE_PRESETS = {
-  "1S": { interval: "1h", limit: 168 },   // 1 săptămână
-  "1L": { interval: "4h", limit: 180 },   // 1 lună
-  "3L": { interval: "4h", limit: 540 },   // 3 luni
-  "6L": { interval: "1d", limit: 182 },   // 6 luni
-  "1A": { interval: "1d", limit: 365 },   // 1 an
-  TOT: { interval: "1w", limit: 1000 },   // tot istoricul real disponibil (Binance ETHUSDT din 2017)
+  "1S": { interval: "1h", limit: 168 },   // 1 week
+  "1L": { interval: "4h", limit: 180 },   // 1 month
+  "3L": { interval: "4h", limit: 540 },   // 3 months
+  "6L": { interval: "1d", limit: 182 },   // 6 months
+  "1A": { interval: "1d", limit: 365 },   // 1 year
+  TOT: { interval: "1w", limit: 1000 },   // all real history available (Binance ETHUSDT since 2017)
 };
 
 const state = {
@@ -21,7 +21,13 @@ const state = {
   useSentiment: true,
   historyLimit: DEFAULT_HISTORY_LIMIT,
   chartType: "candles",
-  indicators: { sma: false, ema: false, bollinger: false, fibonacci: false },
+  indicators: { sma: false, ema: false, bollinger: false, fibonacci: false, vwap: false, patterns: false },
+  backend: "sklearn",
+  // "tuned" (regularized GBR, better average error) vs "legacy" (sklearn's
+  // own defaults, the original model) - see ml/price_predictor.py's
+  // module-level comment for why both stay selectable rather than one
+  // replacing the other.
+  modelVariant: "legacy",
 };
 
 const els = {
@@ -30,7 +36,6 @@ const els = {
   source: document.getElementById("source"),
   pinnedTicker: document.getElementById("pinnedTicker"),
   updated: document.getElementById("updated"),
-  refresh: document.getElementById("refresh"),
   errorBanner: document.getElementById("errorBanner"),
   intervalGroup: document.getElementById("intervalGroup"),
   rangeGroup: document.getElementById("rangeGroup"),
@@ -39,6 +44,7 @@ const els = {
   steps: document.getElementById("steps"),
   stepsValue: document.getElementById("stepsValue"),
   useSentiment: document.getElementById("useSentiment"),
+  modelVariantGroup: document.getElementById("modelVariantGroup"),
   chart: document.getElementById("chart"),
   chartWrap: document.querySelector(".chart-wrap"),
   chartEmpty: document.getElementById("chartEmpty"),
@@ -47,10 +53,15 @@ const els = {
   confidence: document.getElementById("confidence"),
   sentimentAvg: document.getElementById("sentimentAvg"),
   backend: document.getElementById("backend"),
+  sentimentContribution: document.getElementById("sentimentContribution"),
+  recalibratedHint: document.getElementById("recalibratedHint"),
+  backtestHint: document.getElementById("backtestHint"),
   outlookDailyPct: document.getElementById("outlookDailyPct"),
   outlookDailyTarget: document.getElementById("outlookDailyTarget"),
+  outlookDailyActual: document.getElementById("outlookDailyActual"),
   outlookWeeklyPct: document.getElementById("outlookWeeklyPct"),
   outlookWeeklyTarget: document.getElementById("outlookWeeklyTarget"),
+  outlookWeeklyActual: document.getElementById("outlookWeeklyActual"),
   trendPct: document.getElementById("trendPct"),
   minPredicted: document.getElementById("minPredicted"),
   maxPredicted: document.getElementById("maxPredicted"),
@@ -61,21 +72,42 @@ const els = {
   signalBadge: document.getElementById("signalBadge"),
   bestBuy: document.getElementById("bestBuy"),
   bestSell: document.getElementById("bestSell"),
+  potentialGain: document.getElementById("potentialGain"),
   rsiValue: document.getElementById("rsiValue"),
   macdValue: document.getElementById("macdValue"),
+  volatilityBadge: document.getElementById("volatilityBadge"),
+  signalAccuracyBuy: document.getElementById("signalAccuracyBuy"),
+  signalAccuracySell: document.getElementById("signalAccuracySell"),
+  signalAccuracyWait: document.getElementById("signalAccuracyWait"),
+  signalAccuracyEmpty: document.getElementById("signalAccuracyEmpty"),
+  signalAccuracyRow: document.getElementById("signalAccuracyRow"),
+  accuracyRangeGroup: document.getElementById("accuracyRangeGroup"),
+  accuracyIntervalGroup: document.getElementById("accuracyIntervalGroup"),
+  accuracyMape: document.getElementById("accuracyMape"),
+  accuracyChart: document.getElementById("accuracyChart"),
+  accuracyChartEmpty: document.getElementById("accuracyChartEmpty"),
+  explainBtn: document.getElementById("explainBtn"),
+  explainPanel: document.getElementById("explainPanel"),
+  explainText: document.getElementById("explainText"),
+  patternAlert: document.getElementById("patternAlert"),
+  patternLegendItem: document.getElementById("patternLegendItem"),
+  explainClose: document.getElementById("explainClose"),
+  l2Rows: document.getElementById("l2Rows"),
 };
 
 const COLORS = {
-  up: "#199e70",
-  down: "#e66767",
-  pred: "#3987e5",
-  sma: "#9085e9",
-  ema: "#d55181",
-  bollinger: "#c3c2b7",
-  fibonacci: "#898781",
-  grid: "#2c2c2a",
-  text: "#898781",
-  surface: "#1a1a19",
+  up: "#2fbf76",
+  down: "#f0546b",
+  pred: "#6d7cf5",
+  sma: "#8b96ff",
+  ema: "#e0729a",
+  bollinger: "#a3aabb",
+  fibonacci: "#676f83",
+  vwap: "#f2a93c",
+  pattern: "#b98bff",
+  grid: "rgba(255, 255, 255, 0.06)",
+  text: "#676f83",
+  surface: "#12151c",
 };
 
 const SMA_PERIOD = 20;
@@ -88,18 +120,27 @@ const MACD_FAST = 12;
 const MACD_SLOW = 26;
 const MACD_SIGNAL = 9;
 
-let chart, candleSeries, volumeSeries, predSeries, upperSeries, lowerSeries;
-let closePriceSeries, smaSeries, emaSeries, bbUpperSeries, bbMiddleSeries, bbLowerSeries;
+let chart, candleSeries, volumeSeries, predSeries, upperBandSeries, lowerBandSeries;
+let closePriceSeries, smaSeries, emaSeries, bbUpperSeries, bbMiddleSeries, bbLowerSeries, vwapSeries;
+let patternUpperSeries, patternLowerSeries;
 let fibPriceLines = [];
+let patternPriceLines = [];
 let lastSortedCandles = [];
 let lastTotalBars = null;
 let forceFullView = false;
 let liveCandleAnchor = null;
 
+let accuracyPanelSklearn;
+
+// installLeftEdgeClamp (shared with detail.js) lives in chart-utils.js,
+// loaded before this script - see that file for the full reasoning
+// (loadChart()'s "keep the user's exact scroll position across a 30s
+// refresh" logic is what makes an unclamped empty window look frozen).
+
 function initChart() {
   if (!window.LightweightCharts) {
     els.chartEmpty.hidden = false;
-    els.chartEmpty.textContent = "Nu s-a putut încărca librăria de grafice (verifică conexiunea la internet).";
+    els.chartEmpty.textContent = t("dashboard.chart.libError");
     return;
   }
 
@@ -110,17 +151,17 @@ function initChart() {
   const tickMarkFormatter = (time, tickMarkType) => {
     const d = new Date(time * 1000);
     const TMT = LightweightCharts.TickMarkType;
-    if (tickMarkType === TMT.Year) return d.toLocaleDateString("ro-RO", { year: "numeric" });
-    if (tickMarkType === TMT.Month) return d.toLocaleDateString("ro-RO", { month: "short", year: "numeric" });
-    if (tickMarkType === TMT.DayOfMonth) return d.toLocaleDateString("ro-RO", { day: "2-digit", month: "short" });
-    return d.toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" });
+    if (tickMarkType === TMT.Year) return d.toLocaleDateString("en-US", { year: "numeric" });
+    if (tickMarkType === TMT.Month) return d.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+    if (tickMarkType === TMT.DayOfMonth) return d.toLocaleDateString("en-US", { day: "2-digit", month: "short" });
+    return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
   };
 
   chart = LightweightCharts.createChart(els.chart, {
     layout: {
       background: { color: "transparent" },
       textColor: COLORS.text,
-      fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
+      fontFamily: "Sora, system-ui, -apple-system, 'Segoe UI', sans-serif",
     },
     grid: {
       vertLines: { color: COLORS.grid },
@@ -128,7 +169,7 @@ function initChart() {
     },
     localization: {
       timeFormatter: (time) =>
-        new Date(time * 1000).toLocaleString("ro-RO", {
+        new Date(time * 1000).toLocaleString("en-US", {
           day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
         }),
     },
@@ -141,18 +182,7 @@ function initChart() {
       tickMarkFormatter,
     },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    handleScroll: {
-      mouseWheel: true,
-      pressedMouseMove: true,
-      horzTouchDrag: true,
-      vertTouchDrag: true,
-    },
-    handleScale: {
-      mouseWheel: true,
-      pinch: true,
-      axisPressedMouseMove: true,
-    },
-    kineticScroll: { touch: true, mouse: true },
+    ...CHART_PAN_ZOOM_OPTIONS,
   });
 
   // createChart() sizes to the container at that exact instant, which can
@@ -192,16 +222,44 @@ function initChart() {
     color: COLORS.bollinger, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
     visible: false, crosshairMarkerVisible: false,
   });
+  vwapSeries = chart.addLineSeries({ color: COLORS.vwap, lineWidth: 2, visible: false, crosshairMarkerVisible: false });
+
+  // Two lines rather than a generic "connect these N points" series - a
+  // geometric pattern (triangle/wedge/channel/flag) is always exactly two
+  // boundaries (upper, lower), so this covers every pattern type with one
+  // pair of series instead of allocating a variable number of them.
+  patternUpperSeries = chart.addLineSeries({
+    color: COLORS.pattern, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed,
+    visible: false, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+  });
+  patternLowerSeries = chart.addLineSeries({
+    color: COLORS.pattern, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed,
+    visible: false, crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+  });
 
   predSeries = chart.addLineSeries({ color: COLORS.pred, lineWidth: 2 });
   // lastValueVisible/priceLineVisible off: with candle + pred + upper +
   // lower all tagging the axis by default, the labels pile up and overlap -
-  // the band's shape is already visible from the dashed lines themselves.
-  upperSeries = chart.addLineSeries({
-    color: COLORS.pred, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
+  // the band's shape is already visible from the shaded area itself.
+  //
+  // Shaded confidence band: an Area series fills from the upper bound down
+  // to a `bottomColor` that fades to *fully transparent* rather than a
+  // flat semi-opaque fill - a flat fill (an earlier version of this, plus
+  // the classic "stack two areas, paint the second in the background
+  // color to erase everything below the real lower bound" technique used
+  // to fake a fill-between-two-lines) extends, opaque, all the way to the
+  // bottom of the price scale, which blanked out the grid/whatever else
+  // sat underneath it for the entire future/prediction span - visible
+  // live as a stark black rectangle under the band. A gradient that ends
+  // in alpha 0 can never paint over anything no matter how far down it
+  // notionally extends, so this can't regress the same way. The lower
+  // bound is a plain dashed line (marks the boundary, fills nothing).
+  upperBandSeries = chart.addAreaSeries({
+    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, lineColor: COLORS.pred,
+    topColor: "rgba(57,135,229,0.28)", bottomColor: "rgba(57,135,229,0)",
     crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
   });
-  lowerSeries = chart.addLineSeries({
+  lowerBandSeries = chart.addLineSeries({
     color: COLORS.pred, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
     crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
   });
@@ -209,6 +267,8 @@ function initChart() {
   new ResizeObserver(() => {
     if (chart) chart.applyOptions({ width: els.chartWrap.clientWidth, height: els.chartWrap.clientHeight });
   }).observe(els.chartWrap);
+
+  installLeftEdgeClamp(chart);
 
   chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
     if (!range || lastTotalBars === null) return;
@@ -240,7 +300,7 @@ function initChart() {
     // relative to the axis - coordinateToPrice() guarantees the two agree,
     // and it also works past "now" (the forecast region), where candle/
     // closePrice series have no data point to look up at all.
-    const price = candleSeries.priceScale().coordinateToPrice(param.point.y);
+    const price = candleSeries.coordinateToPrice(param.point.y);
     if (price === null) {
       els.chartTooltip.hidden = true;
       return;
@@ -255,6 +315,155 @@ function initChart() {
     els.chartTooltip.style.left = `${Math.max(4, left)}px`;
     els.chartTooltip.style.top = `${Math.max(4, param.point.y - 14)}px`;
   });
+}
+
+// Historical predicted-vs-actual comparison (see /api/predict/accuracy):
+// how closely the model's one-step-ahead forecast has tracked what
+// actually happened, over the last month or year - not just its current
+// live forecast. Factored out as its own instance (rather than one fixed
+// chart) since this used to also track a second, since-removed LSTM
+// backend on its own chart - kept this way in case a second backend
+// worth comparing against ever comes back.
+function createAccuracyPanel({ chartEl, emptyEl, mapeEl, rangeGroupEl, intervalGroupEl, backend, defaultInterval = "1h", defaultDays = 30 }) {
+  const panel = {
+    interval: defaultInterval, days: defaultDays, chart: null,
+    actualSeries: null, predSeries: null, predSeriesOther: null,
+  };
+
+  function init() {
+    if (!window.LightweightCharts) return;
+
+    panel.chart = LightweightCharts.createChart(chartEl, {
+      layout: {
+        background: { color: "transparent" },
+        textColor: COLORS.text,
+        fontFamily: "Sora, system-ui, -apple-system, 'Segoe UI', sans-serif",
+      },
+      grid: {
+        vertLines: { color: COLORS.grid },
+        horzLines: { color: COLORS.grid },
+      },
+      localization: {
+        timeFormatter: (time) =>
+          new Date(time * 1000).toLocaleString("en-US", { day: "2-digit", month: "short", year: "numeric" }),
+      },
+      rightPriceScale: { borderColor: COLORS.grid },
+      timeScale: { borderColor: COLORS.grid, timeVisible: false, secondsVisible: false },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      ...CHART_PAN_ZOOM_OPTIONS,
+    });
+    panel.chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
+
+    panel.actualSeries = panel.chart.addLineSeries({ color: COLORS.up, lineWidth: 2 });
+    panel.predSeries = panel.chart.addLineSeries({ color: COLORS.pred, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed });
+    // The *other* model variant's own predictions, same real backdrop -
+    // lets a "new model" toggle selection still show what "old model"
+    // would have called here, and vice versa, without switching the toggle
+    // back and forth. Red (COLORS.down) specifically so it never gets
+    // confused with the primary (accent-blue) prediction line.
+    panel.predSeriesOther = panel.chart.addLineSeries({
+      color: COLORS.down, lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dotted,
+    });
+
+    installLeftEdgeClamp(panel.chart);
+
+    new ResizeObserver(() => {
+      if (panel.chart) {
+        panel.chart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
+      }
+    }).observe(chartEl);
+
+    rangeGroupEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-accuracy-days]");
+      if (!btn) return;
+      panel.days = Number(btn.dataset.accuracyDays);
+      [...rangeGroupEl.children].forEach((b) => b.classList.toggle("active", b === btn));
+      load();
+    });
+
+    intervalGroupEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-accuracy-interval]");
+      if (!btn) return;
+      panel.interval = btn.dataset.accuracyInterval;
+      [...intervalGroupEl.children].forEach((b) => b.classList.toggle("active", b === btn));
+      load();
+    });
+  }
+
+  async function load() {
+    if (!panel.chart) return;
+    try {
+      // Unfiltered, same as before the model-variant toggle existed - the
+      // full recorded history, regardless of which model happens to be
+      // selected live right now. Filtering this to state.modelVariant
+      // seemed appealing (this line "follows the toggle") but broke the
+      // whole panel the moment it was tried: "tuned" has no history at all
+      // until its first prediction's target time actually elapses, so the
+      // panel just went blank instead of showing years of real data it
+      // already had. The "tuned" line specifically is what the second
+      // (red) series below is for - always that one variant, not whichever
+      // is toggled.
+      const data = await apiGet("/api/predict/accuracy", { interval: panel.interval, days: panel.days, backend });
+      if (!data.points.length) {
+        emptyEl.hidden = false;
+        panel.actualSeries.setData([]);
+        panel.predSeries.setData([]);
+        panel.predSeriesOther.setData([]);
+        mapeEl.textContent = "—";
+        return;
+      }
+      emptyEl.hidden = true;
+      panel.actualSeries.setData(data.points.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.actual_price })));
+      panel.predSeries.setData(data.points.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.predicted_price })));
+      panel.chart.timeScale().fitContent();
+      mapeEl.textContent =
+        data.mape === null || data.mape === undefined
+          ? "—"
+          : tf("dashboard.accuracy.mapeTemplate", { pct: data.mape.toFixed(2), n: data.points.length, interval: panel.interval });
+
+      // Best-effort, never blocks the primary line above: "tuned" only
+      // started being tagged today (see repository.get_prediction_accuracy_series),
+      // so this can legitimately be empty for a while after a fresh
+      // deploy - expected, not an error.
+      try {
+        const other = await apiGet("/api/predict/accuracy", {
+          interval: panel.interval, days: panel.days, backend, model_variant: "tuned",
+        });
+        panel.predSeriesOther.setData(
+          (other.points || []).map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.predicted_price }))
+        );
+      } catch {
+        panel.predSeriesOther.setData([]);
+      }
+    } catch (exc) {
+      emptyEl.hidden = false;
+      emptyEl.textContent = tf("dashboard.accuracy.fetchError", { msg: exc.message });
+      mapeEl.textContent = "—";
+    }
+  }
+
+  return { init, load };
+}
+
+const BACKTEST_LIMIT = 100;
+
+// Compact "backtesting visible" hint next to the confidence score - the
+// confidence score itself only reflects the *current* forecast's interval
+// width; this instead says how the model's actual past 1-step-ahead calls
+// at the currently selected interval panned out against what really
+// happened, so trust doesn't rest on a single static number.
+async function loadBacktestHint() {
+  try {
+    const data = await apiGet("/api/predict/accuracy", { interval: state.interval, limit: BACKTEST_LIMIT });
+    if (!data.count) {
+      els.backtestHint.textContent = t("dashboard.backtest.accumulating");
+      return;
+    }
+    els.backtestHint.textContent =
+      tf("dashboard.backtest.template", { pct: data.mape.toFixed(2), n: data.count, interval: state.interval });
+  } catch {
+    els.backtestHint.textContent = t("dashboard.backtest.dash");
+  }
 }
 
 function toUnixSeconds(iso) {
@@ -302,6 +511,28 @@ function computeBollinger(values, period, mult) {
     lower.push(middle[i] - mult * std);
   }
   return { upper, middle, lower };
+}
+
+// Cumulative VWAP over the whole currently-loaded window (not anchored to
+// a calendar day/session the way an exchange's intraday VWAP usually is -
+// simplest honest option given this dashboard's interval ranges from 15m
+// to 1w, where a "trading day" anchor doesn't mean the same thing).
+// Volume-weighted, so it moves toward wherever the heaviest trading
+// actually happened, not just the average price - a real institutional/
+// whale reference: price trading above it means buyers have been paying a
+// premium over that volume-weighted level, and vice versa below it.
+function computeVWAP(candles) {
+  const out = [];
+  let cumPV = 0;
+  let cumVolume = 0;
+  for (const c of candles) {
+    const typicalPrice = (c.high + c.low + c.close) / 3;
+    const volume = c.volume || 0;
+    cumPV += typicalPrice * volume;
+    cumVolume += volume;
+    out.push(cumVolume > 0 ? cumPV / cumVolume : null);
+  }
+  return out;
 }
 
 function computeRSI(closes, period) {
@@ -365,8 +596,9 @@ function updateIndicatorSeries(sorted) {
   bbUpperSeries.applyOptions({ visible: showBB });
   bbMiddleSeries.applyOptions({ visible: showBB });
   bbLowerSeries.applyOptions({ visible: showBB });
+  let bb = null;
   if (showBB) {
-    const bb = computeBollinger(closes, BOLLINGER_PERIOD, BOLLINGER_MULT);
+    bb = computeBollinger(closes, BOLLINGER_PERIOD, BOLLINGER_MULT);
     bbUpperSeries.setData(toSeriesData(bb.upper));
     bbMiddleSeries.setData(toSeriesData(bb.middle));
     bbLowerSeries.setData(toSeriesData(bb.lower));
@@ -376,15 +608,39 @@ function updateIndicatorSeries(sorted) {
     bbLowerSeries.setData([]);
   }
 
+  vwapSeries.applyOptions({ visible: state.indicators.vwap });
+  const vwapValues = state.indicators.vwap ? computeVWAP(sorted) : [];
+  vwapSeries.setData(state.indicators.vwap ? toSeriesData(vwapValues) : []);
+
   updateFibonacci();
+  updateLastIndicatorValues(closes, bb, vwapValues);
+}
+
+// Snapshot of each active indicator's latest value, kept for the "explică
+// cu AI" feature (loadExplainContext) - the toggles show these on the
+// chart but nowhere summarize what they currently say together.
+let lastIndicatorValues = {};
+function updateLastIndicatorValues(closes, bb, vwapValues) {
+  const lastClose = closes[closes.length - 1];
+  lastIndicatorValues = {
+    price: lastClose,
+    sma: state.indicators.sma ? computeSMA(closes, SMA_PERIOD).at(-1) : null,
+    ema: state.indicators.ema ? computeEMA(closes, EMA_PERIOD).at(-1) : null,
+    bollinger: state.indicators.bollinger && bb
+      ? { upper: bb.upper.at(-1), middle: bb.middle.at(-1), lower: bb.lower.at(-1) }
+      : null,
+    vwap: state.indicators.vwap ? vwapValues.at(-1) : null,
+  };
 }
 
 // Fibonacci retracement is only meaningful for the swing you're actually
 // looking at, not the whole fetched history - so it's computed from
 // whichever candles are currently in view, and recomputed live as you pan
 // or zoom (see the subscribeVisibleLogicalRangeChange call in initChart).
+let lastFibonacciRange = null;
 function updateFibonacci() {
   clearFibonacciLines();
+  lastFibonacciRange = null;
   if (!state.indicators.fibonacci || !lastSortedCandles.length || !chart) return;
 
   const range = chart.timeScale().getVisibleLogicalRange();
@@ -396,6 +652,7 @@ function updateFibonacci() {
 
   const high = Math.max(...visible.map((c) => c.high));
   const low = Math.min(...visible.map((c) => c.low));
+  lastFibonacciRange = { high, low };
   const series = getActivePriceSeries();
   fibPriceLines = FIB_LEVELS.map((level) =>
     series.createPriceLine({
@@ -407,6 +664,141 @@ function updateFibonacci() {
       title: `Fib ${(level * 100).toFixed(1)}%`,
     })
   );
+}
+
+// Rule-based chart pattern recognition (see ml/pattern_recognition.py):
+// candlestick shapes get a small arrow marker on their own candle;
+// geometric patterns (triangle/wedge/channel etc.) get their defining
+// points connected as one or two dashed lines, plus a neckline/target
+// price line when the pattern has one. Only these two "two boundary
+// lines" pattern families actually have separate upper/lower trendlines
+// in the data (see pattern_recognition.py's detect_triangle_or_wedge /
+// _detect_channel) - everything else (Double Top, Head & Shoulders,
+// Flag...) is a single sequence of defining points, so it goes on one line.
+const PATTERN_TWO_LINE_NAMES = new Set([
+  "Ascending Triangle", "Descending Triangle", "Symmetrical Triangle", "Expanding Triangle",
+  "Rising Wedge", "Falling Wedge", "Ascending Channel", "Descending Channel", "Horizontal Channel",
+]);
+const PATTERN_MARKER_SHAPE = { bullish: "arrowUp", bearish: "arrowDown", neutral: "circle" };
+function patternDirectionLabel(direction) {
+  const key = { bullish: "dashboard.pattern.dirBullish", bearish: "dashboard.pattern.dirBearish", neutral: "dashboard.pattern.dirNeutral" }[direction];
+  return key ? t(key) : direction;
+}
+
+function clearPatternOverlay() {
+  if (!chart) return;
+  const series = getActivePriceSeries();
+  patternPriceLines.forEach((line) => series.removePriceLine(line));
+  patternPriceLines = [];
+  patternUpperSeries.applyOptions({ visible: false });
+  patternLowerSeries.applyOptions({ visible: false });
+  patternUpperSeries.setData([]);
+  patternLowerSeries.setData([]);
+  candleSeries.setMarkers([]);
+  els.patternAlert.hidden = true;
+  els.patternLegendItem.hidden = true;
+}
+
+function renderPatternAlert(candlestickPatterns, topGeometric) {
+  // One entry per distinct pattern *type* (Doji, Tweezer Bottom, ...) -
+  // the chart can label the same shape on several candles at once, but a
+  // reader wants to know what each shape means once, not read the same
+  // explanation repeated for every candle it happened to match on.
+  const byName = new Map();
+  [...candlestickPatterns].sort((a, b) => a.index - b.index).forEach((p) => byName.set(p.name, p));
+  const distinctCandleTypes = [...byName.values()].sort((a, b) => b.index - a.index);
+
+  const items = [];
+  if (topGeometric) items.push(topGeometric);
+  items.push(...distinctCandleTypes);
+
+  if (!items.length) {
+    els.patternAlert.hidden = true;
+    return;
+  }
+  const renderItem = (p) => `
+    <div class="pattern-alert-item">
+      <span class="pattern-alert-badge ${p.direction}">${patternDirectionLabel(p.direction)}</span>
+      <span class="pattern-alert-name">${p.name}${p.confirmed === false ? t("dashboard.pattern.forming") : ""}</span>
+      <span class="pattern-alert-note">${p.note}</span>
+      ${p.target != null ? `<span class="pattern-alert-target">${tf("dashboard.pattern.target", { price: fmtMoney(p.target) })}</span>` : ""}
+    </div>
+  `;
+
+  els.patternAlert.hidden = false;
+  els.patternAlert.className = `pattern-alert ${items[0].direction}`;
+  els.patternAlert.innerHTML =
+    (topGeometric ? renderItem(topGeometric) : "") +
+    (distinctCandleTypes.length
+      ? `<div class="pattern-alert-heading">${t("dashboard.pattern.headingCandlestick")}</div>${distinctCandleTypes.map(renderItem).join("")}`
+      : "");
+}
+
+async function loadPatterns() {
+  if (!state.indicators.patterns) {
+    clearPatternOverlay();
+    return;
+  }
+  try {
+    const data = await apiGet("/api/patterns", { interval: state.interval, lang: getLang() });
+
+    const markers = data.candlestick
+      .map((p) => ({
+        time: toUnixSeconds(p.timestamp),
+        position: p.direction === "bearish" ? "aboveBar" : "belowBar",
+        color: p.direction === "bullish" ? COLORS.up : p.direction === "bearish" ? COLORS.down : COLORS.text,
+        shape: PATTERN_MARKER_SHAPE[p.direction] || "circle",
+        text: p.name,
+      }))
+      .sort((a, b) => a.time - b.time); // Lightweight Charts requires markers in ascending time order.
+    candleSeries.setMarkers(markers);
+
+    const series = getActivePriceSeries();
+    patternPriceLines.forEach((line) => series.removePriceLine(line));
+    patternPriceLines = [];
+
+    const top = data.geometric[0];
+    const toPoint = (lvl) => ({ time: toUnixSeconds(lvl.timestamp), value: lvl.price });
+    els.patternLegendItem.hidden = !top;
+    if (!top) {
+      patternUpperSeries.applyOptions({ visible: false });
+      patternLowerSeries.applyOptions({ visible: false });
+      patternUpperSeries.setData([]);
+      patternLowerSeries.setData([]);
+    } else if (PATTERN_TWO_LINE_NAMES.has(top.name)) {
+      // upper_count marks where the upper-line pivots end and the lower-line
+      // ones begin - highs/lows aren't always equal counts (see
+      // ml/pattern_recognition.py's _detect_triangle_or_wedge), so a plain
+      // half/half split can put a low on the upper line or vice versa.
+      const splitAt = top.upper_count ?? Math.ceil(top.levels.length / 2);
+      patternUpperSeries.setData(top.levels.slice(0, splitAt).map(toPoint).sort((a, b) => a.time - b.time));
+      patternLowerSeries.setData(top.levels.slice(splitAt).map(toPoint).sort((a, b) => a.time - b.time));
+      patternUpperSeries.applyOptions({ visible: true });
+      patternLowerSeries.applyOptions({ visible: true });
+    } else {
+      patternUpperSeries.setData([...top.levels].map(toPoint).sort((a, b) => a.time - b.time));
+      patternUpperSeries.applyOptions({ visible: true });
+      patternLowerSeries.applyOptions({ visible: false });
+      patternLowerSeries.setData([]);
+    }
+
+    if (top && top.neckline != null) {
+      patternPriceLines.push(series.createPriceLine({
+        price: top.neckline, color: COLORS.text, lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: t("dashboard.pattern.necklineTitle"),
+      }));
+    }
+    if (top && top.target != null) {
+      patternPriceLines.push(series.createPriceLine({
+        price: top.target, color: top.direction === "bearish" ? COLORS.down : COLORS.up, lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted, axisLabelVisible: true, title: t("dashboard.pattern.targetTitle"),
+      }));
+    }
+
+    renderPatternAlert(data.candlestick, top);
+  } catch (exc) {
+    clearPatternOverlay();
+  }
 }
 
 async function apiGet(path, params) {
@@ -466,26 +858,35 @@ function qualityClass(confidence) {
 
 function fmtTime(iso) {
   const d = new Date(iso);
-  return d.toLocaleString("ro-RO", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString("en-US", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 function fmtTimeShort(iso) {
   const d = new Date(iso);
-  return d.toLocaleString("ro-RO", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString("en-US", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
 function fmtRelative(iso) {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  if (mins < 1) return "chiar acum";
-  if (mins < 60) return `acum ${mins} min`;
+  if (mins < 1) return t("common.relative.justNow");
+  if (mins < 60) return tf("common.relative.minutesAgo", { n: mins });
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `acum ${hours} h`;
-  return `acum ${Math.round(hours / 24)} zile`;
+  if (hours < 24) return tf("common.relative.hoursAgo", { n: hours });
+  return tf("common.relative.daysAgo", { n: Math.round(hours / 24) });
+}
+
+// Same wording as fmtRelative, but from an elapsed-seconds count (how
+// long ago the model was last retrained) rather than an ISO timestamp.
+function fmtElapsed(seconds) {
+  const mins = Math.round(seconds / 60);
+  if (mins < 1) return t("common.relative.justNow");
+  if (mins < 60) return tf("common.relative.minutesAgo", { n: mins });
+  return tf("common.relative.hoursAgo", { n: Math.round(mins / 60) });
 }
 
 function sentimentBadge(label) {
   const icons = { positive: "▲", negative: "▼", neutral: "●" };
   const safe = ["positive", "negative", "neutral"].includes(label) ? label : "neutral";
-  return `<span class="sentiment-badge ${safe}">${icons[safe]} ${safe}</span>`;
+  return `<span class="sentiment-badge ${safe}">${icons[safe]} ${t(`common.sentiment.${safe}`)}</span>`;
 }
 
 function renderCurrentPrice(current) {
@@ -508,7 +909,7 @@ async function loadCurrentPrice() {
   } catch (exc) {
     els.price.textContent = "—";
     els.change.textContent = "";
-    showError(`Nu pot obține prețul curent: ${exc.message}`);
+    showError(tf("dashboard.error.currentPrice", { msg: exc.message }));
   }
 }
 
@@ -522,7 +923,7 @@ async function tickLivePrice() {
   try {
     const current = await apiGet("/api/price/current");
     renderCurrentPrice(current);
-    els.updated.textContent = `actualizat ${new Date().toLocaleTimeString("ro-RO")}`;
+    els.updated.textContent = tf("dashboard.updated.template", { time: new Date().toLocaleTimeString("en-US") });
     if (chart && liveCandleAnchor && current.price != null) {
       liveCandleAnchor.high = Math.max(liveCandleAnchor.high, current.price);
       liveCandleAnchor.low = Math.min(liveCandleAnchor.low, current.price);
@@ -549,14 +950,14 @@ async function loadChart() {
   // fetch (fast) should sit blocked behind it.
   const [historyResult, predictionResult] = await Promise.allSettled([
     apiGet("/api/price/history", { interval: state.interval, limit: state.historyLimit }),
-    apiGet("/api/predict", { interval: state.interval, steps: state.steps, use_sentiment: state.useSentiment }),
+    apiGet("/api/predict", { interval: state.interval, steps: state.steps, use_sentiment: state.useSentiment, backend: state.backend, model_variant: state.modelVariant }),
   ]);
 
   let candles = [];
   if (historyResult.status === "fulfilled") {
     candles = historyResult.value.candles || [];
   } else {
-    showError(`Nu pot obține istoricul de prețuri: ${historyResult.reason.message}`);
+    showError(tf("dashboard.error.priceHistory", { msg: historyResult.reason.message }));
   }
 
   let prediction = null;
@@ -568,7 +969,7 @@ async function loadChart() {
     if (exc.status === 409) {
       showError(exc.message);
     } else {
-      showError(`Predicția a eșuat: ${exc.message}`);
+      showError(tf("dashboard.error.predictionFailed", { msg: exc.message }));
     }
   }
 
@@ -632,12 +1033,12 @@ async function loadChart() {
         const upperPoints = [anchor, ...prediction.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.upper }))];
         const lowerPoints = [anchor, ...prediction.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.lower }))];
         predSeries.setData(predPoints);
-        upperSeries.setData(upperPoints);
-        lowerSeries.setData(lowerPoints);
+        upperBandSeries.setData(upperPoints);
+        lowerBandSeries.setData(lowerPoints);
       } else {
         predSeries.setData([]);
-        upperSeries.setData([]);
-        lowerSeries.setData([]);
+        upperBandSeries.setData([]);
+        lowerBandSeries.setData([]);
       }
       const predCount = prediction && prediction.predictions ? prediction.predictions.length : 0;
       const newTotalBars = sorted.length + predCount;
@@ -670,8 +1071,8 @@ async function loadChart() {
       volumeSeries.setData([]);
       closePriceSeries.setData([]);
       predSeries.setData([]);
-      upperSeries.setData([]);
-      lowerSeries.setData([]);
+      upperBandSeries.setData([]);
+      lowerBandSeries.setData([]);
       updateIndicatorSeries([]);
       liveCandleAnchor = null;
     }
@@ -682,6 +1083,14 @@ async function loadChart() {
     els.confidence.className = `stat-value ${qualityClass(prediction.confidence)}`;
     els.sentimentAvg.textContent = prediction.sentiment_avg.toFixed(2);
     els.backend.textContent = prediction.backend;
+    els.sentimentContribution.textContent =
+      prediction.sentiment_contribution_pct === null || prediction.sentiment_contribution_pct === undefined
+        ? t("dashboard.sentiment.unavailable")
+        : tf("dashboard.sentiment.template", { pct: prediction.sentiment_contribution_pct.toFixed(1) });
+    // Concrete evidence the "sentiment in model" toggle isn't just a
+    // static setting - the model actually retrains from scratch (fresh
+    // sentiment + price data) every time the cache expires, not once ever.
+    els.recalibratedHint.textContent = tf("dashboard.recalibrated", { time: fmtElapsed(prediction.trained_ago_seconds) });
 
     if (prediction.predictions.length) {
       const basePrice = prediction.last_known_price;
@@ -727,6 +1136,8 @@ async function loadChart() {
     els.confidence.className = "stat-value";
     els.sentimentAvg.textContent = "—";
     els.backend.textContent = "—";
+    els.sentimentContribution.textContent = t("dashboard.sentiment.dash");
+    els.recalibratedHint.textContent = "—";
     els.predictionRows.innerHTML = `<tr class="empty-row"><td colspan="3">—</td></tr>`;
     els.trendPct.textContent = "—";
     els.trendPct.className = "summary-value";
@@ -739,17 +1150,79 @@ async function loadChart() {
 function resetSignalPanel() {
   els.signalBadge.textContent = "—";
   els.signalBadge.className = "signal-badge";
+  delete els.signalBadge.dataset.signal;
   els.bestBuy.textContent = "—";
   els.bestSell.textContent = "—";
+  els.potentialGain.textContent = "—";
+  els.potentialGain.className = "stat-value stat-value--small";
   els.rsiValue.textContent = "—";
   els.macdValue.textContent = "—";
+  els.volatilityBadge.hidden = true;
+}
+
+// How much the model's own predicted low->high swing is worth, as a %,
+// spelled out as one number instead of making the reader do the
+// subtraction between Best Buy and Best Sell themselves. Not a claim that
+// low necessarily comes before high chronologically (see minPoint/maxPoint
+// above) - just "the spread the model is currently predicting".
+function computePotentialGainPct(minPoint, maxPoint) {
+  if (!minPoint.predicted_price) return null;
+  return ((maxPoint.predicted_price - minPoint.predicted_price) / minPoint.predicted_price) * 100;
+}
+
+// Recent (last 24 candles) return volatility vs. this same asset's own
+// longer trailing average, as a ratio - not an absolute number, so "Calm"/
+// "Volatile" mean the same thing regardless of which chart interval
+// (15m..1w) is selected. A ratio well above 1 means this asset is choppier
+// right now than its own normal behavior (lean less on the confidence
+// score); well below 1 means calmer than usual.
+const VOLATILITY_RECENT_WINDOW = 24;
+const VOLATILITY_HIGH_RATIO = 1.3;
+const VOLATILITY_LOW_RATIO = 0.7;
+
+function computeVolatilityRegime(closes) {
+  if (closes.length < 30) return null;
+  const returns = [];
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i - 1]) returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+  }
+  const stdDev = (values) => {
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+    return Math.sqrt(variance);
+  };
+  const baselineVol = stdDev(returns);
+  if (!baselineVol) return null;
+  const recentVol = stdDev(returns.slice(-VOLATILITY_RECENT_WINDOW));
+  const ratio = recentVol / baselineVol;
+  if (ratio >= VOLATILITY_HIGH_RATIO) return "volatile";
+  if (ratio <= VOLATILITY_LOW_RATIO) return "calm";
+  return "normal";
 }
 
 function updateSignalPanel({ minPoint, maxPoint, trendPct, confidence, sentimentAvg }) {
   els.bestBuy.textContent = `${fmtMoney(minPoint.predicted_price)} · ${fmtTimeShort(minPoint.timestamp)}`;
   els.bestSell.textContent = `${fmtMoney(maxPoint.predicted_price)} · ${fmtTimeShort(maxPoint.timestamp)}`;
 
+  const potentialGainPct = computePotentialGainPct(minPoint, maxPoint);
+  if (potentialGainPct !== null) {
+    els.potentialGain.textContent = `${arrow(potentialGainPct)} +${potentialGainPct.toFixed(2)}%`;
+    els.potentialGain.className = `stat-value stat-value--small price-${directionClass(potentialGainPct)}`;
+  } else {
+    els.potentialGain.textContent = "—";
+  }
+
   const closes = lastSortedCandles.map((c) => c.close);
+
+  const regime = computeVolatilityRegime(closes);
+  if (regime) {
+    els.volatilityBadge.hidden = false;
+    els.volatilityBadge.textContent = t(`dashboard.volatility.${regime}`);
+    els.volatilityBadge.className = `regime-badge ${regime}`;
+  } else {
+    els.volatilityBadge.hidden = true;
+  }
+
   let rsi = null;
   let macdBullish = null;
   if (closes.length >= RSI_PERIOD + 1) {
@@ -763,7 +1236,7 @@ function updateSignalPanel({ minPoint, maxPoint, trendPct, confidence, sentiment
   }
 
   if (rsi !== null) {
-    const zone = rsi < 30 ? " (supravândut)" : rsi > 70 ? " (supracumpărat)" : "";
+    const zone = rsi < 30 ? t("dashboard.signal.oversold") : rsi > 70 ? t("dashboard.signal.overbought") : "";
     els.rsiValue.textContent = `${rsi.toFixed(1)}${zone}`;
   } else {
     els.rsiValue.textContent = "—";
@@ -783,22 +1256,50 @@ function updateSignalPanel({ minPoint, maxPoint, trendPct, confidence, sentiment
   if (sentimentAvg > 0.1) score += 0.5;
   else if (sentimentAvg < -0.1) score -= 0.5;
 
-  let label = "AȘTEAPTĂ";
+  // cls ("wait"/"buy"/"sell") is the language-independent signal state -
+  // stored in the badge's class, not derived from its (localized) label -
+  // so explainIndicators() below can key off it regardless of language.
+  let labelKey = "dashboard.signal.wait";
   let cls = "wait";
   if (confidence >= 40 && score >= 1.5) {
-    label = "CUMPĂRĂ";
+    labelKey = "dashboard.signal.buy";
     cls = "buy";
   } else if (confidence >= 40 && score <= -1.5) {
-    label = "VINDE";
+    labelKey = "dashboard.signal.sell";
     cls = "sell";
   }
-  els.signalBadge.textContent = label;
+  els.signalBadge.textContent = t(labelKey);
   els.signalBadge.className = `signal-badge ${cls}`;
+  els.signalBadge.dataset.signal = cls;
+}
+
+// The outlook tiles' own %/target (above) are the AI's forecast for the
+// NEXT period - a completely different time window than "how much has ETH
+// actually already moved", so the two will often disagree (that's expected,
+// not staleness: a small predicted 24h move right after a real, already-
+// happened rally isn't a contradiction, since that rally is already priced
+// into the current baseline the forecast starts from). Fetched and shown
+// separately here so the forward-looking prediction and the backward-
+// looking fact are never mistaken for one another.
+//
+// Calendar-aligned, not rolling: "actual today" resets at 00:00 UTC (the
+// open of the current 1d candle), "actual this week" resets every Monday
+// 00:00 UTC (the open of the current 1w candle) - explicitly requested
+// over a rolling "last 24h"/"last 7d" window, and it falls out for free
+// from data already being collected, since Binance's own 1d/1w candles are
+// already bucketed to UTC calendar days / ISO weeks (Monday start).
+function formatActualPct(pct) {
+  return `${arrow(pct)} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
 }
 
 async function loadOutlook() {
   try {
-    const outlook = await apiGet("/api/outlook", { use_sentiment: state.useSentiment });
+    const [outlook, currentPrice, todayCandles, thisWeekCandles] = await Promise.all([
+      apiGet("/api/outlook", { use_sentiment: state.useSentiment, backend: state.backend, model_variant: state.modelVariant }),
+      apiGet("/api/price/current", {}),
+      apiGet("/api/price/history", { interval: "1d", limit: 1 }),
+      apiGet("/api/price/history", { interval: "1w", limit: 1 }),
+    ]);
     for (const [leg, pctEl, targetEl] of [
       [outlook.daily, els.outlookDailyPct, els.outlookDailyTarget],
       [outlook.weekly, els.outlookWeeklyPct, els.outlookWeeklyTarget],
@@ -806,7 +1307,26 @@ async function loadOutlook() {
       const cls = directionClass(leg.change_pct);
       pctEl.textContent = `${arrow(leg.change_pct)} ${leg.change_pct >= 0 ? "+" : ""}${leg.change_pct.toFixed(2)}%`;
       pctEl.className = `outlook-pct ${cls}`;
-      targetEl.textContent = `țintă ${fmtMoney(leg.predicted_price)}`;
+      targetEl.textContent = tf("dashboard.outlook.targetTemplate", { price: fmtMoney(leg.predicted_price) });
+    }
+
+    const livePrice = currentPrice.price;
+    const todayOpen = todayCandles.candles?.[0]?.open;
+    if (typeof livePrice === "number" && todayOpen) {
+      const actualTodayPct = ((livePrice - todayOpen) / todayOpen) * 100;
+      els.outlookDailyActual.textContent = tf("dashboard.outlook.actual24hTemplate", { pct: formatActualPct(actualTodayPct) });
+      els.outlookDailyActual.className = `outlook-actual ${directionClass(actualTodayPct)}`;
+    } else {
+      els.outlookDailyActual.textContent = "";
+    }
+
+    const weekOpen = thisWeekCandles.candles?.[0]?.open;
+    if (typeof livePrice === "number" && weekOpen) {
+      const actualWeekPct = ((livePrice - weekOpen) / weekOpen) * 100;
+      els.outlookWeeklyActual.textContent = tf("dashboard.outlook.actual7dTemplate", { pct: formatActualPct(actualWeekPct) });
+      els.outlookWeeklyActual.className = `outlook-actual ${directionClass(actualWeekPct)}`;
+    } else {
+      els.outlookWeeklyActual.textContent = "";
     }
   } catch {
     els.outlookDailyPct.textContent = "—";
@@ -815,16 +1335,58 @@ async function loadOutlook() {
     els.outlookWeeklyPct.className = "outlook-pct";
     els.outlookDailyTarget.textContent = "";
     els.outlookWeeklyTarget.textContent = "";
+    els.outlookDailyActual.textContent = "";
+    els.outlookWeeklyActual.textContent = "";
+  }
+}
+
+// Renders one "Buy calls" / "Sell calls" tile: count + win rate, colored
+// by whether the heuristic has actually been right more often than not.
+// "Wait" gets its own simpler renderer just below - it makes no
+// directional claim, so there's no correct/incorrect to score.
+function renderSignalAccuracyTile(el, stat) {
+  if (!stat || !stat.count) {
+    el.textContent = t("dashboard.signalAccuracy.noCalls");
+    el.className = "stat-value stat-value--small";
+    return;
+  }
+  const pct = Math.round((stat.correct / stat.count) * 100);
+  el.textContent = tf("dashboard.signalAccuracy.record", { correct: stat.correct, count: stat.count, pct });
+  el.className = `stat-value stat-value--small price-${pct >= 50 ? "up" : "down"}`;
+}
+
+async function loadSignalAccuracy() {
+  try {
+    // Fixed 1h/24-step, matching backfill_signal_history's default - the
+    // one combo actually being backtested (see data_collector/jobs.py),
+    // regardless of whatever interval the main chart is currently on.
+    const data = await apiGet("/api/signal/accuracy", { interval: "1h" });
+    const total = (data.buy?.count || 0) + (data.sell?.count || 0) + (data.wait?.count || 0);
+    els.signalAccuracyEmpty.hidden = total > 0;
+    els.signalAccuracyRow.hidden = total === 0;
+    renderSignalAccuracyTile(els.signalAccuracyBuy, data.buy);
+    renderSignalAccuracyTile(els.signalAccuracySell, data.sell);
+    els.signalAccuracyWait.textContent = data.wait?.count
+      ? String(data.wait.count)
+      : t("dashboard.signalAccuracy.noCalls");
+    els.signalAccuracyWait.className = "stat-value stat-value--small";
+  } catch {
+    els.signalAccuracyEmpty.hidden = false;
+    els.signalAccuracyRow.hidden = true;
   }
 }
 
 async function loadSummary() {
   try {
-    const summary = await apiGet("/api/summary", { interval: state.interval });
+    // No `interval` param: the daily summary is always about tomorrow
+    // (matches the "Predicție 24h" outlook tile) regardless of which
+    // interval the main chart happens to be showing - see
+    // api.services.run_combined_summary's docstring for why.
+    const summary = await apiGet("/api/summary", { backend: state.backend, lang: getLang(), model_variant: state.modelVariant });
     els.narrative.textContent = summary.narrative;
   } catch (exc) {
     if (exc.status !== 409) {
-      els.narrative.textContent = `Rezumatul a eșuat: ${exc.message}`;
+      els.narrative.textContent = tf("dashboard.summary.fetchFailed", { msg: exc.message });
     }
   }
 }
@@ -833,7 +1395,7 @@ async function loadNews() {
   try {
     const { news } = await apiGet("/api/news", { limit: 30 });
     if (!news.length) {
-      els.newsList.innerHTML = `<p class="empty-hint">Niciun articol colectat încă. Rulează <code>python run_scheduler.py</code>.</p>`;
+      els.newsList.innerHTML = `<p class="empty-hint">${t("dashboard.news.empty")} <code>python run_scheduler.py</code>.</p>`;
       return;
     }
     els.newsList.innerHTML = news
@@ -853,7 +1415,7 @@ async function loadNews() {
       })
       .join("");
   } catch (exc) {
-    els.newsList.innerHTML = `<p class="empty-hint">Nu pot obține știrile: ${exc.message}</p>`;
+    els.newsList.innerHTML = `<p class="empty-hint">${tf("dashboard.news.fetchFailed", { msg: exc.message })}</p>`;
   }
 }
 
@@ -907,11 +1469,141 @@ async function loadGas() {
   }
 }
 
+function fmtTvl(usd) {
+  if (usd >= 1e9) return `$${(usd / 1e9).toFixed(2)}B`;
+  if (usd >= 1e6) return `$${(usd / 1e6).toFixed(1)}M`;
+  return `$${usd.toLocaleString("en-US")}`;
+}
+
+function l2TierLabel(tier) {
+  const key = { established: "dashboard.l2.tier.established", growing: "dashboard.l2.tier.growing", emerging: "dashboard.l2.tier.emerging" }[tier];
+  return key ? t(key) : tier;
+}
+
+// Ethereum L2 rollup TVL leaderboard (see /api/l2 / data_collector/l2_registry.py) -
+// "layers" of ETH the user asked to see, ranked by real, live TVL.
+async function loadL2Panel() {
+  try {
+    const { chains } = await apiGet("/api/l2");
+    if (!chains.length) {
+      els.l2Rows.innerHTML = `<tr class="empty-row"><td colspan="4">${t("dashboard.l2.fetchFail")}</td></tr>`;
+      return;
+    }
+    els.l2Rows.innerHTML = chains
+      .map(
+        (c) => `<tr>
+          <td>${c.display_name}</td>
+          <td>${fmtTvl(c.tvl_usd)}</td>
+          <td>${c.launch_year}</td>
+          <td><span class="l2-tier l2-tier-${c.tier}">${l2TierLabel(c.tier)}</span></td>
+        </tr>`
+      )
+      .join("");
+  } catch (exc) {
+    els.l2Rows.innerHTML = `<tr class="empty-row"><td colspan="4">${tf("dashboard.l2.fetchError", { msg: exc.message })}</td></tr>`;
+  }
+}
+
+// Rule-based explanation of whatever indicators are currently active -
+// no external API, no key, computed instantly from values already sitting
+// in lastIndicatorValues/lastFibonacciRange. Same "always works, nothing
+// to configure" approach ml/combined_predictor.py already uses for the
+// daily narrative's rule-based fallback - this just doesn't have (or
+// need) a Claude-backed upgrade path on top of it.
+function explainIndicators() {
+  const price = lastIndicatorValues.price;
+  if (price == null) return t("dashboard.explain.noPrice");
+
+  const active = Object.entries(state.indicators).filter(([, on]) => on).map(([name]) => name);
+  if (!active.length) {
+    return t("dashboard.explain.noIndicators");
+  }
+
+  const lines = [];
+
+  if (state.indicators.sma && lastIndicatorValues.sma != null) {
+    const sma = lastIndicatorValues.sma;
+    const diffPct = ((price - sma) / sma) * 100;
+    if (Math.abs(diffPct) < 0.1) {
+      lines.push(tf("dashboard.explain.smaFlat", { price: fmtMoney(price), sma: fmtMoney(sma) }));
+    } else {
+      lines.push(tf("dashboard.explain.smaTrend", {
+        pct: Math.abs(diffPct).toFixed(2),
+        dir: t(diffPct > 0 ? "dashboard.explain.above" : "dashboard.explain.below"),
+        sma: fmtMoney(sma),
+        trend: t(diffPct > 0 ? "dashboard.explain.uptrend" : "dashboard.explain.downtrend"),
+      }));
+    }
+  }
+
+  if (state.indicators.ema && lastIndicatorValues.ema != null) {
+    const ema = lastIndicatorValues.ema;
+    lines.push(tf(price >= ema ? "dashboard.explain.emaUp" : "dashboard.explain.emaDown", { ema: fmtMoney(ema) }));
+  }
+
+  if (state.indicators.bollinger && lastIndicatorValues.bollinger) {
+    const { upper, lower } = lastIndicatorValues.bollinger;
+    const bandWidth = upper - lower;
+    const posPct = bandWidth > 0 ? ((price - lower) / bandWidth) * 100 : 50;
+    if (posPct >= 90) {
+      lines.push(tf("dashboard.explain.bollUpper", { upper: fmtMoney(upper) }));
+    } else if (posPct <= 10) {
+      lines.push(tf("dashboard.explain.bollLower", { lower: fmtMoney(lower) }));
+    } else {
+      lines.push(tf("dashboard.explain.bollMid", { lower: fmtMoney(lower), upper: fmtMoney(upper) }));
+    }
+  }
+
+  if (state.indicators.vwap && lastIndicatorValues.vwap != null) {
+    const vwap = lastIndicatorValues.vwap;
+    lines.push(tf(price >= vwap ? "dashboard.explain.vwapAbove" : "dashboard.explain.vwapBelow", { vwap: fmtMoney(vwap) }));
+  }
+
+  if (state.indicators.fibonacci && lastFibonacciRange) {
+    const { high, low } = lastFibonacciRange;
+    const range = high - low;
+    if (range > 0) {
+      const nearest = FIB_LEVELS
+        .map((level) => ({ level, price: high - level * range }))
+        .reduce((a, b) => (Math.abs(price - b.price) < Math.abs(price - a.price) ? b : a));
+      lines.push(tf("dashboard.explain.fib", {
+        low: fmtMoney(low), high: fmtMoney(high),
+        level: (nearest.level * 100).toFixed(1), price: fmtMoney(nearest.price),
+      }));
+    }
+  }
+
+  const rsiText = els.rsiValue.textContent;
+  if (rsiText && rsiText !== "—") lines.push(tf("dashboard.explain.rsi", { value: rsiText }));
+  const macdText = els.macdValue.textContent;
+  if (macdText && macdText !== "—") lines.push(tf("dashboard.explain.macd", { value: macdText }));
+
+  const signalState = els.signalBadge.dataset.signal;
+  const signalText = els.signalBadge.textContent;
+  if (signalState === "wait") {
+    lines.push(t("dashboard.explain.signalWait"));
+  } else if (signalState && signalText && signalText !== "—") {
+    lines.push(tf("dashboard.explain.signalOther", { signal: signalText }));
+  }
+
+  return lines.join(" ");
+}
+
+function toggleExplainPanel() {
+  const willShow = els.explainPanel.hidden;
+  if (willShow) els.explainText.textContent = explainIndicators();
+  els.explainPanel.hidden = !willShow;
+}
+
 async function loadAll() {
   clearError();
-  els.updated.textContent = "se încarcă…";
-  await Promise.all([loadCurrentPrice(), loadChart(), loadOutlook(), loadSummary(), loadNews(), loadGas(), loadPinnedTicker()]);
-  els.updated.textContent = `actualizat ${new Date().toLocaleTimeString("ro-RO")}`;
+  els.updated.textContent = t("dashboard.updated.loading");
+  await Promise.all([
+    loadCurrentPrice(), loadChart(), loadOutlook(), loadSummary(), loadNews(), loadGas(),
+    loadPinnedTicker(), accuracyPanelSklearn.load(), loadL2Panel(), loadBacktestHint(), loadPatterns(),
+    loadSignalAccuracy(),
+  ]);
+  els.updated.textContent = tf("dashboard.updated.template", { time: new Date().toLocaleTimeString("en-US") });
 }
 
 // Every trigger (buttons, slider, checkbox, manual/auto refresh) funnels
@@ -940,6 +1632,12 @@ els.intervalGroup.addEventListener("click", (e) => {
   if (!btn) return;
   state.interval = btn.dataset.interval;
   state.historyLimit = DEFAULT_HISTORY_LIMIT;
+  // Without this, switching intervals reused lastTotalBars/the saved zoom
+  // window width from the *previous* interval's bar density (e.g. going
+  // from "1w" - a few hundred bars total - to "15m" - thousands) against
+  // the new data, landing on a nonsensical zoom/pan range instead of the
+  // clean "last ~120 bars" default a fresh load gets (see loadChart()).
+  lastTotalBars = null;
   [...els.intervalGroup.children].forEach((b) => b.classList.toggle("active", b === btn));
   [...els.rangeGroup.children].forEach((b) => b.classList.remove("active"));
   requestReload();
@@ -972,7 +1670,16 @@ els.useSentiment.addEventListener("change", () => {
   requestReload();
 });
 
-els.refresh.addEventListener("click", requestReload);
+els.modelVariantGroup.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-model-variant]");
+  if (!btn) return;
+  state.modelVariant = btn.dataset.modelVariant;
+  [...els.modelVariantGroup.children].forEach((b) => b.classList.toggle("active", b === btn));
+  requestReload();
+  // Not accuracyPanelSklearn.load() - that chart's two lines (unfiltered
+  // history + the "tuned" comparison line) are independent of the live
+  // toggle above, so there's nothing there for this click to refresh.
+});
 
 els.chartTypeGroup.addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-chart-type]");
@@ -992,7 +1699,11 @@ els.indicatorsGroup.addEventListener("change", (e) => {
   if (!input) return;
   state.indicators[input.dataset.indicator] = input.checked;
   updateIndicatorSeries(lastSortedCandles);
+  if (input.dataset.indicator === "patterns") loadPatterns();
 });
+
+els.explainBtn.addEventListener("click", toggleExplainPanel);
+els.explainClose.addEventListener("click", () => { els.explainPanel.hidden = true; });
 
 const AUTO_REFRESH_MS = 30000;
 // Matches the server's price cache TTL (api/routes.py) - polling faster
@@ -1003,6 +1714,22 @@ const AUTO_REFRESH_MS = 30000;
 const LIVE_TICK_MS = 3000;
 
 initChart();
+accuracyPanelSklearn = createAccuracyPanel({
+  chartEl: els.accuracyChart, emptyEl: els.accuracyChartEmpty, mapeEl: els.accuracyMape,
+  rangeGroupEl: els.accuracyRangeGroup, intervalGroupEl: els.accuracyIntervalGroup, backend: "sklearn",
+});
+accuracyPanelSklearn.init();
 requestReload();
 setInterval(requestReload, AUTO_REFRESH_MS);
 setInterval(tickLivePrice, LIVE_TICK_MS);
+
+// i18n.js already re-applies static data-i18n markup on its own; this
+// re-runs everything *dynamically* rendered (predictions table, signal
+// panel, pattern alert, news, L2 table, the fetched summary/pattern
+// narrative text) so a language switch updates it immediately instead of
+// waiting for the next 30s auto-refresh.
+document.addEventListener("langchange", () => {
+  requestReload();
+  accuracyPanelSklearn.load();
+  if (!els.explainPanel.hidden) els.explainText.textContent = explainIndicators();
+});

@@ -10,14 +10,14 @@
   align-items: center;
   gap: 20px;
   flex-wrap: wrap;
-  padding: 14px 16px;
+  padding: 15px 18px;
 }
 
 .asset-type-group {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   background: var(--surface-2);
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
   padding: 3px;
 }
 .asset-type-group button {
@@ -26,12 +26,13 @@
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
-  padding: 6px 14px;
-  border-radius: 6px;
+  padding: 6px 15px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
 }
-.asset-type-group button.active { background: var(--focus); color: #fff; }
-.asset-type-group button:not(.active):hover { color: var(--text-primary); }
+.asset-type-group button.active { background: var(--accent); color: #fff; box-shadow: 0 3px 10px -3px rgba(109, 124, 245, 0.8); }
+.asset-type-group button:not(.active):hover { color: var(--text-primary); background: var(--surface-3); }
 
 .scout-disclaimer {
   font-size: 12px;
@@ -40,18 +41,19 @@
 
 .pinned-toggle {
   background: var(--surface-2);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
-  padding: 7px 14px;
-  border-radius: 8px;
+  padding: 7px 15px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease), color 0.15s var(--ease);
 }
-.pinned-toggle:hover { color: var(--text-primary); }
+.pinned-toggle:hover { color: var(--text-primary); border-color: var(--border-strong); }
 .pinned-toggle.active {
-  background: rgba(230, 178, 44, 0.15);
-  border-color: rgba(230, 178, 44, 0.4);
+  background: rgba(242, 169, 60, 0.15);
+  border-color: rgba(242, 169, 60, 0.4);
   color: var(--warning);
 }
 
@@ -64,8 +66,9 @@
   line-height: 1;
   color: var(--text-muted);
   padding: 2px;
+  transition: color 0.15s var(--ease), transform 0.15s var(--ease);
 }
-.pin-btn:hover { color: var(--warning); }
+.pin-btn:hover { color: var(--warning); transform: scale(1.15); }
 .pin-btn.pinned { color: var(--warning); }
 
 .scout-table-card { padding: 0; overflow: hidden; }
@@ -84,17 +87,26 @@
   color: var(--text-muted);
   font-weight: 600;
   font-size: 12px;
-  padding: 12px 14px;
+  padding: 13px 14px;
   border-bottom: 1px solid var(--gridline);
   white-space: nowrap;
 }
+/* Columns: () · # · Activ · Preț curent · Preț prezis · Schimbare · Încredere ·
+   Sentiment · Știri · Scor - every numeric column right-aligns so digits
+   stack into a readable column instead of ragging on the left. */
+.scout-table th:nth-child(n+4),
+.scout-table td:nth-child(n+4) {
+  text-align: right;
+}
 .scout-table td {
-  padding: 10px 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--gridline);
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   white-space: nowrap;
 }
+.scout-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
 /* .scout-table td (0,1,1) otherwise beats the bare .price-up/.quality-*
    classes (0,1,0) regardless of file order - same trap as elsewhere,
    fixed the same way: a compound selector that's unambiguously more specific. */
@@ -104,9 +116,10 @@
 .scout-table td.quality-decent { color: var(--warning); }
 .scout-table td.quality-good   { color: var(--good); }
 .scout-table tbody tr.clickable-row { cursor: pointer; }
+.scout-table tbody tr { transition: background 0.12s var(--ease); }
 .scout-table tbody tr:hover { background: var(--surface-2); }
 .scout-table tbody tr:last-child td { border-bottom: none; }
-.empty-row td { text-align: center; color: var(--text-muted); padding: 32px 14px; }
+.empty-row td { text-align: center; color: var(--text-muted); padding: 32px 14px; font-family: var(--font-ui); }
 
 .rank-cell { color: var(--text-muted); font-weight: 700; width: 32px; }
 .mega-cap-badge {
@@ -115,30 +128,76 @@
   font-weight: 700;
   letter-spacing: 0.02em;
   padding: 1px 6px;
-  border-radius: 4px;
-  background: rgba(230, 178, 44, 0.15);
+  border-radius: var(--radius-sm);
+  background: rgba(242, 169, 60, 0.15);
   color: var(--warning);
   vertical-align: middle;
+  font-family: var(--font-ui);
 }
-.empty-hint-cell { color: var(--text-muted); font-style: italic; }
+/* Overrides the numeric-column right-align above (0,2,1 tie broken by the
+   extra .scout-table qualifier) - this cell is a full-width sentence, not a number. */
+.scout-table td.empty-hint-cell { text-align: left; }
+.empty-hint-cell { color: var(--text-muted); font-style: italic; font-family: var(--font-ui); }
 .empty-hint-cell .nav-link { font-style: normal; }
 
 .asset-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  font-family: var(--font-ui);
 }
 .asset-symbol { color: var(--text-primary); font-weight: 700; }
 .asset-name { color: var(--text-muted); font-size: 12px; }
 .asset-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 2px 6px;
-  border-radius: 4px;
+  letter-spacing: 0.04em;
+  padding: 3px 9px 3px 7px;
+  border-radius: var(--radius-pill);
 }
-.asset-type-badge.crypto { background: rgba(57,135,229,0.15); color: var(--focus); }
-.asset-type-badge.stock  { background: rgba(213,81,129,0.15); color: var(--ema, #d55181); }
+.asset-type-badge::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.asset-type-badge.crypto { background: rgba(109, 124, 245, 0.15); color: var(--accent-strong); }
+.asset-type-badge.stock  { background: rgba(224, 114, 154, 0.15); color: var(--stock); }
 
 .score-cell { font-weight: 700; }
+.score-pill {
+  display: inline-block;
+  padding: 4px 11px;
+  border-radius: var(--radius-pill);
+  font-weight: 700;
+}
+.score-pill.up   { background: rgba(47, 191, 118, 0.15); color: var(--good); }
+.score-pill.down { background: rgba(240, 84, 107, 0.15); color: var(--critical); }
+
+/* Confidence: number + a small at-a-glance bar (same quality color, via
+   currentColor) - "68/100" alone reads the same whether it's 68 or 61;
+   the bar makes the gap between a decent and a strong pick visible
+   without doing mental math on every row. */
+.confidence-cell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.confidence-value { font-weight: 700; min-width: 20px; text-align: right; }
+.confidence-bar {
+  display: inline-block;
+  width: 44px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.confidence-fill { display: block; height: 100%; border-radius: 3px; background: currentColor; }

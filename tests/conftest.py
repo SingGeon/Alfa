@@ -47,6 +47,18 @@ def reset_news_cache():
 
 
 @pytest.fixture(autouse=True)
+def reset_defillama_cache():
+    """data_collector.defillama_client caches both the TVL history and the
+    L2 chain list at module level - same leak risk across tests as the
+    other module-level caches here if left uncleared.
+    """
+    import data_collector.defillama_client as defillama_client
+
+    defillama_client._cache.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_scout_caches():
     """api.routes caches /api/scout/detail and /api/scout/price responses
     per (asset_type, id) (see routes.py) - same leak risk as the other

@@ -42,11 +42,11 @@ function qualityClass(confidence) {
 
 function fmtRelative(iso) {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  if (mins < 1) return "chiar acum";
-  if (mins < 60) return `acum ${mins} min`;
+  if (mins < 1) return t("common.relative.justNow");
+  if (mins < 60) return tf("common.relative.minutesAgo", { n: mins });
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `acum ${hours} h`;
-  return `acum ${Math.round(hours / 24)} zile`;
+  if (hours < 24) return tf("common.relative.hoursAgo", { n: hours });
+  return tf("common.relative.daysAgo", { n: Math.round(hours / 24) });
 }
 
 async function loadPins() {
@@ -72,7 +72,7 @@ async function loadScout() {
     render(data.results || []);
   } catch (exc) {
     els.errorBanner.hidden = false;
-    els.errorBanner.textContent = `Nu pot obține rezultatele scout: ${exc.message}`;
+    els.errorBanner.textContent = tf("scout.error.fetchResults", { msg: exc.message });
   }
 }
 
@@ -103,8 +103,8 @@ function render(results) {
 
   if (!rows.length) {
     els.scoutRows.innerHTML = state.pinnedOnly
-      ? `<tr class="empty-row"><td colspan="10">Niciun activ fixat încă — apasă ☆ pe un rând pentru a-l memora.</td></tr>`
-      : `<tr class="empty-row"><td colspan="10">Nicio scanare încă — prima scanare pornește automat cu run_scheduler.py și poate dura câteva minute (analizează ~80 active).</td></tr>`;
+      ? `<tr class="empty-row"><td colspan="10">${t("scout.empty.pinned")}</td></tr>`
+      : `<tr class="empty-row"><td colspan="10">${t("scout.empty.noScan")}</td></tr>`;
     els.scannedAt.textContent = "";
     return;
   }
@@ -112,19 +112,19 @@ function render(results) {
   const withScanTime = results.filter((r) => r.scanned_at);
   if (withScanTime.length) {
     const latest = withScanTime.reduce((a, b) => (new Date(a.scanned_at) > new Date(b.scanned_at) ? a : b));
-    els.scannedAt.textContent = `ultima scanare ${fmtRelative(latest.scanned_at)}`;
+    els.scannedAt.textContent = tf("scout.scannedAt", { time: fmtRelative(latest.scanned_at) });
   }
 
   els.scoutRows.innerHTML = rows
     .map((r, i) => {
-      const typeLabel = r.asset_type === "crypto" ? "Cripto" : "Acțiune";
+      const typeLabel = t(r.asset_type === "crypto" ? "common.assetType.crypto" : "common.assetType.stock");
       const href = `/detail.html?type=${encodeURIComponent(r.asset_type)}&id=${encodeURIComponent(r.id)}`;
       const pinned = state.pinnedKeys.has(pinKey(r.asset_type, r.id));
-      const pinCell = `<td class="pin-cell"><button class="pin-btn ${pinned ? "pinned" : ""}" data-pin-type="${r.asset_type}" data-pin-id="${r.id}" data-pin-symbol="${r.symbol}" data-pin-name="${r.name}" title="${pinned ? "Scoate de la fixate" : "Fixează"}">${pinned ? "★" : "☆"}</button></td>`;
+      const pinCell = `<td class="pin-cell"><button class="pin-btn ${pinned ? "pinned" : ""}" data-pin-type="${r.asset_type}" data-pin-id="${r.id}" data-pin-symbol="${r.symbol}" data-pin-name="${r.name}" title="${pinned ? t("scout.pin.remove") : t("scout.pin.add")}">${pinned ? "★" : "☆"}</button></td>`;
       // Mega-cap picks clear a much higher bar (see scanner.py's
       // MEGA_CAP_MIN_CHANGE_PCT) before ever showing up at all, so the
       // badge is a "this one's a big deal" flag, not a warning.
-      const megaCapBadge = r.tier === "mega_cap" ? `<span class="mega-cap-badge" title="Mișcare dramatică prezisă pentru un activ mare, nu un underdog">⭐ Mega-cap</span>` : "";
+      const megaCapBadge = r.tier === "mega_cap" ? `<span class="mega-cap-badge" title="${t("scout.megaCap.title")}">${t("scout.megaCap.label")}</span>` : "";
 
       if (r._orphan) {
         return `<tr>
@@ -139,7 +139,7 @@ function render(results) {
               </div>
             </div>
           </td>
-          <td colspan="6" class="empty-hint-cell">nu mai e în ultima scanare · <a class="nav-link" href="${href}">vezi detalii</a></td>
+          <td colspan="6" class="empty-hint-cell">${t("scout.row.notInLatestScan")} <a class="nav-link" href="${href}">${t("scout.row.viewDetails")}</a></td>
         </tr>`;
       }
 
@@ -161,10 +161,15 @@ function render(results) {
         <td>${fmtMoney(r.current_price)}</td>
         <td>${fmtMoney(r.predicted_price)}</td>
         <td class="price-${changeCls}">${arrow(r.predicted_change_pct)} ${r.predicted_change_pct >= 0 ? "+" : ""}${r.predicted_change_pct.toFixed(2)}%</td>
-        <td class="${qualityClass(r.confidence)}">${Math.round(r.confidence)}/100</td>
+        <td class="${qualityClass(r.confidence)}">
+          <div class="confidence-cell">
+            <span class="confidence-value">${Math.round(r.confidence)}</span>
+            <span class="confidence-bar"><span class="confidence-fill" style="width:${Math.max(0, Math.min(100, r.confidence))}%"></span></span>
+          </div>
+        </td>
         <td class="price-${sentimentCls}">${r.sentiment_avg.toFixed(2)}</td>
         <td>${r.articles_analyzed}</td>
-        <td class="score-cell price-${scoreCls}">${r.score.toFixed(2)}</td>
+        <td class="score-cell"><span class="score-pill ${scoreCls}">${r.score.toFixed(2)}</span></td>
       </tr>`;
     })
     .join("");
@@ -208,7 +213,7 @@ els.assetTypeGroup.addEventListener("click", (e) => {
 els.pinnedToggle.addEventListener("click", () => {
   state.pinnedOnly = !state.pinnedOnly;
   els.pinnedToggle.classList.toggle("active", state.pinnedOnly);
-  els.pinnedToggle.textContent = state.pinnedOnly ? "★ Fixate" : "☆ Fixate";
+  els.pinnedToggle.textContent = t(state.pinnedOnly ? "scout.toolbar.pinnedActive" : "scout.toolbar.pinned");
   loadScout();
 });
 
@@ -224,3 +229,11 @@ els.scoutRows.addEventListener("click", (e) => {
 
 loadScout();
 setInterval(loadScout, 60000);
+
+// Static labels re-apply themselves (i18n.js); this re-renders the table
+// (asset-type labels, pin titles, empty states) and the pinned-toggle
+// button, which are built dynamically and wouldn't otherwise update.
+document.addEventListener("langchange", () => {
+  els.pinnedToggle.textContent = t(state.pinnedOnly ? "scout.toolbar.pinnedActive" : "scout.toolbar.pinned");
+  loadScout();
+});

@@ -1,32 +1,51 @@
 """HTTP routes. Thin: validation + delegating to database/repository or
 api/services, then serializing to JSON.
 
-
-
     ----------RUN Command----------
 cd /home/singeon/Documents/Alfa
 .venv/bin/python run_api.py
 
-cd /home/singeon/Documents/Alfa
-.venv/bin/python run_scheduler.py
-
-
+(run_api.py seeds and schedules market/news collection itself now - see
+its module docstring - so this one command is normally all you need.
+run_scheduler.py is still there for anyone running collection as its own
+process, e.g. multiple API workers sharing one collector.)
 """
 from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
 
 import config
-from api.services import InsufficientDataError, run_combined_summary, run_outlook, run_prediction
+from api.services import (
+    MODEL_VARIANTS,
+    PREDICTION_BACKENDS,
+    InsufficientDataError,
+    get_prediction_accuracy,
+    run_combined_summary,
+    run_outlook,
+    run_prediction,
+)
 from data_collector.market_data import SUPPORTED_INTERVALS, MarketDataError, get_current_price
 from database import repository
+from ml import pattern_recognition
 
 logger = logging.getLogger(__name__)
 
 api_bp = Blueprint("api", __name__)
+
+
+def _get_lang() -> str:
+    """`lang` query param for any endpoint whose response includes
+    human-readable narrative/note text (see ml/combined_predictor.py,
+    scout/narrative.py, ml/pattern_recognition.py) - defaults to English,
+    silently falls back to it for anything else instead of 400ing (this is
+    display language, not a correctness-affecting input worth rejecting).
+    """
+    lang = request.args.get("lang", "en")
+    return lang if lang in ("en", "ro") else "en"
 
 # Short server-side cache for the current-price ticker. get_current_price()
 # tries Binance first (weight-1 call, generous ~1200/min limit) and only
@@ -72,20 +91,35 @@ def price_history():
     return jsonify({"coin_id": coin_id, "interval": interval, "candles": candles})
 
 
+def _get_model_variant() -> tuple[str | None, tuple]:
+    """Shared query-param parsing for every route that trains a model -
+    returns (model_variant, error_response_or_empty_tuple)."""
+    model_variant = request.args.get("model_variant", "tuned")
+    if model_variant not in MODEL_VARIANTS:
+        return None, (jsonify({"error": f"model_variant must be one of {sorted(MODEL_VARIANTS)}"}), 400)
+    return model_variant, ()
+
+
 @api_bp.get("/predict")
 def predict():
     coin_id = request.args.get("coin_id", config.COIN_ID)
     interval = request.args.get("interval", "1h")
     steps = int(request.args.get("steps", config.PREDICTION_HORIZON_HOURS))
     use_sentiment = request.args.get("use_sentiment", "true").lower() != "false"
+    backend = request.args.get("backend")
 
     if interval not in SUPPORTED_INTERVALS:
         return jsonify({"error": f"interval must be one of {sorted(SUPPORTED_INTERVALS)}"}), 400
     if not (1 <= steps <= 500):
         return jsonify({"error": "steps must be between 1 and 500"}), 400
+    if backend is not None and backend not in PREDICTION_BACKENDS:
+        return jsonify({"error": f"backend must be one of {sorted(PREDICTION_BACKENDS)}"}), 400
+    model_variant, err = _get_model_variant()
+    if err:
+        return err
 
     try:
-        return jsonify(run_prediction(coin_id, interval, steps, use_sentiment))
+        return jsonify(run_prediction(coin_id, interval, steps, use_sentiment, backend, model_variant))
     except InsufficientDataError as exc:
         return jsonify({"error": str(exc)}), 409
 
@@ -94,8 +128,14 @@ def predict():
 def outlook():
     coin_id = request.args.get("coin_id", config.COIN_ID)
     use_sentiment = request.args.get("use_sentiment", "true").lower() != "false"
+    backend = request.args.get("backend")
+    if backend is not None and backend not in PREDICTION_BACKENDS:
+        return jsonify({"error": f"backend must be one of {sorted(PREDICTION_BACKENDS)}"}), 400
+    model_variant, err = _get_model_variant()
+    if err:
+        return err
     try:
-        return jsonify(run_outlook(coin_id, use_sentiment))
+        return jsonify(run_outlook(coin_id, use_sentiment, backend, model_variant))
     except InsufficientDataError as exc:
         return jsonify({"error": str(exc)}), 409
 
@@ -129,6 +169,18 @@ def sentiment_summary():
             "daily": {str(day): round(score, 4) for day, score in sorted(daily.items())},
         }
     )
+
+
+@api_bp.get("/l2")
+def l2_tvls():
+    """Ethereum L2 rollups ranked by live TVL, each tagged "established" /
+    "growing" / "emerging" - a TVL-and-age heuristic (see
+    data_collector.defillama_client._tier), NOT an audit or insurance
+    claim: this app has no way to verify either from a free public API.
+    """
+    from data_collector.defillama_client import get_l2_tvls
+
+    return jsonify({"chains": get_l2_tvls()})
 
 
 @api_bp.get("/gas")
@@ -182,8 +234,12 @@ def scout_detail():
     asset_id = request.args.get("id")
     if asset_type not in ("crypto", "stock") or not asset_id:
         return jsonify({"error": "asset_type ('crypto'|'stock') and id are required"}), 400
+    lang = _get_lang()
 
-    cache_key = (asset_type, asset_id)
+    # lang is part of the cache key - the cached dict has the narrative
+    # baked in, so a request in the other language would otherwise get
+    # served stale text in whichever language happened to be cached first.
+    cache_key = (asset_type, asset_id, lang)
     cached = _scout_detail_cache.get(cache_key)
     if cached and time.monotonic() - cached[0] < _SCOUT_DETAIL_CACHE_TTL_SECONDS:
         return jsonify(cached[1])
@@ -202,10 +258,10 @@ def scout_detail():
     try:
         if asset_type == "crypto":
             detail = pipeline.detail_for_crypto(
-                asset_id, match["symbol"], match["name"], f"{match['symbol']}USDT"
+                asset_id, match["symbol"], match["name"], f"{match['symbol']}USDT", lang=lang
             )
         else:
-            detail = pipeline.detail_for_stock(asset_id, match["name"])
+            detail = pipeline.detail_for_stock(asset_id, match["name"], lang=lang)
     except Exception:
         logger.exception("Scout detail analysis failed for %s/%s", asset_type, asset_id)
         return jsonify({"error": "Analysis failed"}), 502
@@ -292,14 +348,103 @@ def scout_pin_remove():
     return jsonify({"status": "unpinned"})
 
 
-@api_bp.get("/summary")
-def summary():
+@api_bp.get("/predict/accuracy")
+def predict_accuracy():
+    """Historical predicted-vs-actual series (see api/services.get_prediction_accuracy)
+    for the "how has the model actually done" chart under the signal panel.
+    """
+    coin_id = request.args.get("coin_id", config.COIN_ID)
+    interval = request.args.get("interval", "1d")
+    days_raw = request.args.get("days")
+    limit_raw = request.args.get("limit")
+    days = int(days_raw) if days_raw is not None else None
+    limit = int(limit_raw) if limit_raw is not None else None
+    backend = request.args.get("backend")
+    # Unfiltered (None) by default, unlike /api/predict's own model_variant
+    # param - the main accuracy line keeps showing full history recorded
+    # before this field existed; only the dashboard's second comparison
+    # line asks for a specific variant explicitly (?model_variant=tuned).
+    model_variant = request.args.get("model_variant")
+
+    if interval not in SUPPORTED_INTERVALS:
+        return jsonify({"error": f"interval must be one of {sorted(SUPPORTED_INTERVALS)}"}), 400
+    if days is not None and not (1 <= days <= 730):
+        return jsonify({"error": "days must be between 1 and 730"}), 400
+    if limit is not None and not (1 <= limit <= 1000):
+        return jsonify({"error": "limit must be between 1 and 1000"}), 400
+    if backend is not None and backend not in PREDICTION_BACKENDS:
+        return jsonify({"error": f"backend must be one of {sorted(PREDICTION_BACKENDS)}"}), 400
+    if model_variant is not None and model_variant not in MODEL_VARIANTS:
+        return jsonify({"error": f"model_variant must be one of {sorted(MODEL_VARIANTS)}"}), 400
+
+    return jsonify(
+        get_prediction_accuracy(coin_id, interval, days=days, limit=limit, backend=backend, model_variant=model_variant)
+    )
+
+
+@api_bp.get("/signal/accuracy")
+def signal_accuracy():
+    """Historical win rate of the "Trading signal" card's own buy/sell/wait
+    call (see ml/trading_signal.py + data_collector.jobs.backfill_signal_history)
+    - not the raw price prediction's accuracy (that's /api/predict/accuracy),
+    but whether *acting on the signal* would actually have paid off.
+    """
+    coin_id = request.args.get("coin_id", config.COIN_ID)
+    interval = request.args.get("interval", "1h")
+    days_raw = request.args.get("days")
+
+    if interval not in SUPPORTED_INTERVALS:
+        return jsonify({"error": f"interval must be one of {sorted(SUPPORTED_INTERVALS)}"}), 400
+    days = None
+    if days_raw is not None:
+        days = int(days_raw)
+        if not (1 <= days <= 730):
+            return jsonify({"error": "days must be between 1 and 730"}), 400
+
+    since = datetime.now(timezone.utc) - timedelta(days=days) if days is not None else None
+    summary = repository.get_signal_accuracy_summary(coin_id, interval, since=since)
+    records = repository.get_signal_records(coin_id, interval, limit=50)
+    for r in records:
+        r["timestamp"] = repository.iso_utc(r["timestamp"])
+        r["target_timestamp"] = repository.iso_utc(r["target_timestamp"])
+
+    return jsonify({"coin_id": coin_id, "interval": interval, "days": days, **summary, "records": records})
+
+
+@api_bp.get("/patterns")
+def patterns():
+    """Rule-based candlestick + geometric chart pattern detection (see
+    ml/pattern_recognition.py) over the same candles the main chart shows -
+    computed live on request, not precomputed, since it's cheap arithmetic
+    over an already-fetched candle window rather than a trained model.
+    """
     coin_id = request.args.get("coin_id", config.COIN_ID)
     interval = request.args.get("interval", "1h")
     if interval not in SUPPORTED_INTERVALS:
         return jsonify({"error": f"interval must be one of {sorted(SUPPORTED_INTERVALS)}"}), 400
+
+    candles = repository.get_candles(coin_id, interval, limit=1000)
+    if len(candles) < 20:
+        return jsonify({"error": f"Only {len(candles)} {interval} candles stored for {coin_id}; need >= 20"}), 409
+
+    return jsonify({"coin_id": coin_id, "interval": interval, **pattern_recognition.analyze(candles, _get_lang())})
+
+
+@api_bp.get("/summary")
+def summary():
+    # No `interval` param: the daily summary is always the next-day
+    # (1d/steps=1) forecast, same as the outlook tile's daily leg - see
+    # run_combined_summary's docstring for the contradictory-narrative bug
+    # that let the chart's own interval selector silently drive this.
+    coin_id = request.args.get("coin_id", config.COIN_ID)
+    backend = request.args.get("backend")
+    if backend is not None and backend not in PREDICTION_BACKENDS:
+        return jsonify({"error": f"backend must be one of {sorted(PREDICTION_BACKENDS)}"}), 400
+    model_variant, err = _get_model_variant()
+    if err:
+        return err
     try:
-        result = run_combined_summary(coin_id, interval)
+        result = run_combined_summary(coin_id, backend, lang=_get_lang(), model_variant=model_variant)
     except InsufficientDataError as exc:
         return jsonify({"error": str(exc)}), 409
     for item in result.get("recent_news", []):

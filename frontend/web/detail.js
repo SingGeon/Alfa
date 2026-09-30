@@ -23,7 +23,7 @@ const els = {
   pinToggle: document.getElementById("pinToggle"),
 };
 
-const COLORS = { up: "#199e70", down: "#e66767", pred: "#3987e5", grid: "#2c2c2a", text: "#898781" };
+const COLORS = { up: "#2fbf76", down: "#f0546b", pred: "#6d7cf5", grid: "rgba(255, 255, 255, 0.06)", text: "#676f83", surface: "#12151c" };
 
 function fmtMoney(v) {
   if (v === null || v === undefined) return "—";
@@ -45,7 +45,7 @@ function qualityClass(confidence) {
   return "quality-good";
 }
 function fmtDay(iso) {
-  return new Date(iso).toLocaleDateString("ro-RO", { day: "2-digit", month: "short" });
+  return new Date(iso).toLocaleDateString("en-US", { day: "2-digit", month: "short" });
 }
 function toUnixSeconds(iso) {
   return Math.floor(new Date(iso).getTime() / 1000);
@@ -58,7 +58,7 @@ function showError(message) {
 
 async function loadDetail() {
   if (!assetType || !assetId) {
-    showError("Lipsește tipul sau id-ul activului în URL.");
+    showError(t("detail.error.missingParams"));
     return;
   }
 
@@ -66,21 +66,22 @@ async function loadDetail() {
     const url = new URL("/api/scout/detail", window.location.origin);
     url.searchParams.set("asset_type", assetType);
     url.searchParams.set("id", assetId);
+    url.searchParams.set("lang", getLang());
     const resp = await fetch(url);
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `${resp.status}`);
     render(data);
   } catch (exc) {
-    showError(`Nu pot obține analiza: ${exc.message}`);
+    showError(tf("detail.error.analysisFailed", { msg: exc.message }));
     els.chartEmpty.hidden = false;
-    els.chartEmpty.textContent = "Analiza a eșuat.";
+    els.chartEmpty.textContent = t("detail.error.analysisFailedShort");
   }
 }
 
 function render(data) {
   els.assetBadge.textContent = data.asset_type === "crypto" ? "🪙" : "🏢";
   els.assetName.textContent = data.name;
-  els.assetSymbol.textContent = `${data.symbol} · ${data.asset_type === "crypto" ? "Cripto" : "Acțiune"}`;
+  els.assetSymbol.textContent = `${data.symbol} · ${t(data.asset_type === "crypto" ? "common.assetType.crypto" : "common.assetType.stock")}`;
   els.price.textContent = fmtMoney(data.current_price);
   els.change.textContent = "";
   document.title = `${data.symbol} — Scout AI`;
@@ -104,7 +105,7 @@ let isPinned = false;
 function setPinButton(pinned) {
   isPinned = pinned;
   els.pinToggle.classList.toggle("pinned", pinned);
-  els.pinToggle.textContent = pinned ? "★ Fixat" : "☆ Fixează";
+  els.pinToggle.textContent = t(pinned ? "detail.pin.pinned" : "detail.pin.pin");
 }
 async function refreshPinState() {
   try {
@@ -140,31 +141,30 @@ async function togglePin() {
 }
 els.pinToggle.addEventListener("click", togglePin);
 
+// installLeftEdgeClamp (shared with app.js) lives in chart-utils.js,
+// loaded before this script.
+
 function renderChart(data) {
   if (!window.LightweightCharts) {
     els.chartEmpty.hidden = false;
-    els.chartEmpty.textContent = "Nu s-a putut încărca librăria de grafice.";
+    els.chartEmpty.textContent = t("detail.error.libError");
     return;
   }
   els.chartEmpty.hidden = true;
 
   const chart = LightweightCharts.createChart(els.chart, {
-    layout: { background: { color: "transparent" }, textColor: COLORS.text, fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif" },
+    layout: { background: { color: "transparent" }, textColor: COLORS.text, fontFamily: "Sora, system-ui, -apple-system, 'Segoe UI', sans-serif" },
     grid: { vertLines: { color: COLORS.grid }, horzLines: { color: COLORS.grid } },
     localization: {
-      timeFormatter: (t) => new Date(t * 1000).toLocaleString("ro-RO", { day: "2-digit", month: "short", year: "numeric" }),
+      timeFormatter: (time) => new Date(time * 1000).toLocaleString("en-US", { day: "2-digit", month: "short", year: "numeric" }),
     },
     rightPriceScale: { borderColor: COLORS.grid },
     timeScale: {
       borderColor: COLORS.grid, timeVisible: false, rightOffset: 8,
-      tickMarkFormatter: (t) => new Date(t * 1000).toLocaleDateString("ro-RO", { day: "2-digit", month: "short" }),
+      tickMarkFormatter: (time) => new Date(time * 1000).toLocaleDateString("en-US", { day: "2-digit", month: "short" }),
     },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    // Same interaction options as the ETH dashboard's chart (app.js) -
-    // free zoom/pan in every direction, not just Lightweight Charts' defaults.
-    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
-    handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
-    kineticScroll: { touch: true, mouse: true },
+    ...CHART_PAN_ZOOM_OPTIONS,
   });
 
   // createChart() sizes to the container at that exact instant - on this
@@ -186,13 +186,26 @@ function renderChart(data) {
   // lastValueVisible/priceLineVisible off: with candle + pred + upper +
   // lower all tagging the axis by default, the labels pile up and overlap
   // (worst on low-priced assets where they all round to similar values) -
-  // the band's shape is already visible from the dashed lines themselves.
-  const bandSeriesOptions = {
+  // the band's shape is already visible from the shaded area itself.
+  //
+  // Shaded confidence band (same technique as the ETH dashboard's chart,
+  // app.js): an Area series fading from the upper bound to *fully
+  // transparent* rather than a flat fill (or the classic "erase with an
+  // opaque background-colored area on top" trick) - either of those
+  // extends, opaque, all the way to the bottom of the price scale, which
+  // blanked out the grid for the entire future/prediction span (a stark
+  // black rectangle, seen live). A gradient ending in alpha 0 can't paint
+  // over anything no matter how far down it notionally extends. The lower
+  // bound is a plain dashed line - marks the boundary, fills nothing.
+  const upperBandSeries = chart.addAreaSeries({
+    lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, lineColor: COLORS.pred,
+    topColor: "rgba(57,135,229,0.28)", bottomColor: "rgba(57,135,229,0)",
+    crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
+  });
+  const lowerBandSeries = chart.addLineSeries({
     color: COLORS.pred, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed,
     crosshairMarkerVisible: false, lastValueVisible: false, priceLineVisible: false,
-  };
-  const upperSeries = chart.addLineSeries(bandSeriesOptions);
-  const lowerSeries = chart.addLineSeries(bandSeriesOptions);
+  });
 
   const sorted = [...data.candles].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
   candleSeries.setData(sorted.map((c) => ({ time: toUnixSeconds(c.timestamp), open: c.open, high: c.high, low: c.low, close: c.close })));
@@ -208,8 +221,8 @@ function renderChart(data) {
     const last = sorted[sorted.length - 1];
     const anchor = { time: toUnixSeconds(last.timestamp), value: last.close };
     predSeries.setData([anchor, ...data.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.predicted_price }))]);
-    upperSeries.setData([anchor, ...data.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.upper }))]);
-    lowerSeries.setData([anchor, ...data.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.lower }))]);
+    upperBandSeries.setData([anchor, ...data.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.upper }))]);
+    lowerBandSeries.setData([anchor, ...data.predictions.map((p) => ({ time: toUnixSeconds(p.timestamp), value: p.lower }))]);
   }
 
   // Zoom in on the recent history + the forecast, not the whole ~200-day
@@ -220,6 +233,8 @@ function renderChart(data) {
   chart.timeScale().setVisibleLogicalRange({ from: sorted.length - defaultWindow, to: totalBars + 2 });
 
   new ResizeObserver(() => chart.applyOptions({ width: els.chartWrap.clientWidth, height: els.chartWrap.clientHeight })).observe(els.chartWrap);
+
+  installLeftEdgeClamp(chart);
 
   // Floating price readout that tracks the mouse, same fix as app.js -
   // without it the only price readout is the axis-edge tag, far from
@@ -234,7 +249,7 @@ function renderChart(data) {
     // where it's drawn relative to the axis - see the same fix in app.js
     // for the full reasoning. Also works past "now" (forecast region),
     // where candleSeries has no data point to look up at all.
-    const price = candleSeries.priceScale().coordinateToPrice(param.point.y);
+    const price = candleSeries.coordinateToPrice(param.point.y);
     if (price === null) {
       els.chartTooltip.hidden = true;
       return;
@@ -273,12 +288,12 @@ function renderPredictionTable(data) {
 function sentimentBadge(label) {
   const icons = { positive: "▲", negative: "▼", neutral: "●" };
   const safe = ["positive", "negative", "neutral"].includes(label) ? label : "neutral";
-  return `<span class="sentiment-badge ${safe}">${icons[safe]} ${safe}</span>`;
+  return `<span class="sentiment-badge ${safe}">${icons[safe]} ${t(`common.sentiment.${safe}`)}</span>`;
 }
 
 function renderNews(news) {
   if (!news || !news.length) {
-    els.newsList.innerHTML = `<p class="empty-hint">Nicio știre relevantă găsită pentru acest activ.</p>`;
+    els.newsList.innerHTML = `<p class="empty-hint">${t("detail.news.empty")}</p>`;
     return;
   }
   els.newsList.innerHTML = news
@@ -291,7 +306,7 @@ function renderNews(news) {
           <span>·</span>
           <span>${a.source || ""}</span>
           <span>·</span>
-          <span>${new Date(a.published_at).toLocaleString("ro-RO", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+          <span>${new Date(a.published_at).toLocaleString("en-US", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
         </div>
       </div>`
     )
@@ -328,3 +343,8 @@ async function tickLivePrice() {
 
 loadDetail();
 setInterval(tickLivePrice, 5000);
+
+// Static labels re-apply themselves (i18n.js); the narrative/news dates
+// come from the server (lang-aware /api/scout/detail), so a language
+// switch re-fetches rather than just re-rendering cached data.
+document.addEventListener("langchange", loadDetail);

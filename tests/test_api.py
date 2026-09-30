@@ -2,6 +2,7 @@ import pytest
 
 import config
 from api import create_app
+from api.services import get_prediction_accuracy
 from database import repository
 from nlp.sentiment import score_article
 
@@ -57,6 +58,22 @@ def test_predict_success(client, seeded):
     body = resp.json
     assert len(body["predictions"]) == 3
     assert 0 <= body["confidence"] <= 100
+    # sklearn's own learned feature importance for "sentiment" - real
+    # signal from the trained model, not a fixed/made-up number - should
+    # be a genuine share of 1.0 across all features.
+    assert 0 <= body["sentiment_contribution_pct"] <= 100
+    assert body["trained_ago_seconds"] >= 0
+
+
+def test_predict_sentiment_contribution_none_without_sentiment(client, seeded):
+    resp = client.get("/api/predict?interval=1h&steps=3&use_sentiment=false")
+    assert resp.status_code == 200
+    assert resp.json["sentiment_contribution_pct"] is None
+
+
+def test_predict_rejects_bad_backend(client):
+    resp = client.get("/api/predict?interval=1h&steps=3&backend=not-a-backend")
+    assert resp.status_code == 400
 
 
 def test_news_and_sentiment(client, seeded):
@@ -69,11 +86,154 @@ def test_news_and_sentiment(client, seeded):
     assert sentiment_resp.json["articles_analyzed"] == 1
 
 
-def test_summary(client, seeded):
-    resp = client.get("/api/summary?interval=1h")
+def test_summary(client, seeded, synthetic_candles):
+    # The daily summary always uses the "1d" interval now (see
+    # run_combined_summary's docstring) regardless of what's passed here -
+    # `seeded` alone (1h candles) isn't enough, so seed "1d" too.
+    repository.save_candles("ethereum", "1d", synthetic_candles(200, interval_hours=24))
+    resp = client.get("/api/summary")
     assert resp.status_code == 200
     assert "narrative" in resp.json
     assert isinstance(resp.json["narrative"], str) and len(resp.json["narrative"]) > 0
+
+
+def test_summary_agrees_with_daily_outlook_direction(client, seeded, synthetic_candles):
+    # Regression test: the daily narrative used to be built from whatever
+    # interval the main chart happened to be on (24 steps of it), which
+    # could - and did, live - point the opposite direction from the "24h"
+    # outlook tile's own 1d-interval forecast, despite both being shown
+    # side by side under a "next ~24h" framing. Both now come from the
+    # exact same interval="1d", steps=1 prediction, so they can't disagree.
+    repository.save_candles("ethereum", "1d", synthetic_candles(200, interval_hours=24))
+    # /api/outlook also computes a weekly leg - needs its own data too, or
+    # the whole call 409s on the weekly leg alone.
+    repository.save_candles("ethereum", "1w", synthetic_candles(200, interval_hours=24 * 7))
+
+    outlook_resp = client.get("/api/outlook")
+    assert outlook_resp.status_code == 200
+    daily_change_pct = outlook_resp.json["daily"]["change_pct"]
+
+    summary_resp = client.get("/api/summary")
+    assert summary_resp.status_code == 200
+    narrative = summary_resp.json["narrative"]
+
+    expected_word = "rise" if daily_change_pct >= 0 else "fall"
+    unexpected_word = "fall" if daily_change_pct >= 0 else "rise"
+    assert expected_word in narrative
+    assert unexpected_word not in narrative
+
+
+def test_predict_accuracy(client, synthetic_candles):
+    repository.save_candles("ethereum", "1d", synthetic_candles(40, interval_hours=24))
+    # Read back through the same repository call the service under test
+    # uses, rather than the pre-insert Python objects: Mongo (real or
+    # mongomock) truncates datetimes to millisecond precision, so the
+    # exact microsecond-precision timestamps synthetic_candles() generates
+    # wouldn't round-trip-match otherwise.
+    stored = repository.get_candles("ethereum", "1d")
+    target = stored[-1]["timestamp"]
+    repository.save_prediction(
+        "ethereum",
+        {
+            "interval": "1d",
+            "predictions": [{"timestamp": repository.iso_utc(target), "predicted_price": stored[-1]["close"] + 10}],
+        },
+    )
+
+    resp = client.get("/api/predict/accuracy?interval=1d&days=30")
+    assert resp.status_code == 200
+    body = resp.json
+    assert len(body["points"]) == 1
+    assert body["points"][0]["actual_price"] == round(stored[-1]["close"], 2)
+    assert body["mape"] is not None
+
+
+def test_predict_accuracy_rejects_bad_interval(client):
+    resp = client.get("/api/predict/accuracy?interval=5m")
+    assert resp.status_code == 400
+
+
+def test_predict_accuracy_rejects_bad_backend(client):
+    resp = client.get("/api/predict/accuracy?interval=1d&backend=not-a-backend")
+    assert resp.status_code == 400
+
+
+def test_predict_accuracy_filters_by_backend(synthetic_candles):
+    # get_prediction_accuracy(backend=...) must only ever return that one
+    # backend's own recorded forecasts, not every backend's blended
+    # together under the same target timestamp - exercised directly
+    # against the service layer (not the /api/predict/accuracy route,
+    # which only ever validates "sklearn" since that's the only backend
+    # PREDICTION_BACKENDS exposes today) so the underlying filtering
+    # mechanism stays covered even with a single active backend.
+    repository.save_candles("ethereum", "1d", synthetic_candles(40, interval_hours=24))
+    stored = repository.get_candles("ethereum", "1d")
+    target = stored[-1]["timestamp"]
+    repository.save_prediction(
+        "ethereum",
+        {
+            "interval": "1d",
+            "backend": "sklearn",
+            "predictions": [{"timestamp": repository.iso_utc(target), "predicted_price": stored[-1]["close"] + 10}],
+        },
+    )
+    repository.save_prediction(
+        "ethereum",
+        {
+            "interval": "1d",
+            "backend": "other-model",
+            "predictions": [{"timestamp": repository.iso_utc(target), "predicted_price": stored[-1]["close"] + 999}],
+        },
+    )
+
+    result = get_prediction_accuracy("ethereum", "1d", days=30, backend="sklearn")
+    assert len(result["points"]) == 1
+    assert result["points"][0]["predicted_price"] == round(stored[-1]["close"] + 10, 2)
+
+    result = get_prediction_accuracy("ethereum", "1d", days=30, backend="other-model")
+    assert len(result["points"]) == 1
+    assert result["points"][0]["predicted_price"] == round(stored[-1]["close"] + 999, 2)
+
+
+def test_predict_accuracy_limit_trims_to_most_recent(client, synthetic_candles):
+    repository.save_candles("ethereum", "1h", synthetic_candles(10, interval_hours=1))
+    stored = repository.get_candles("ethereum", "1h")
+    for candle in stored:
+        repository.save_prediction(
+            "ethereum",
+            {
+                "interval": "1h",
+                "predictions": [{"timestamp": repository.iso_utc(candle["timestamp"]), "predicted_price": candle["close"] + 1}],
+            },
+        )
+
+    resp = client.get("/api/predict/accuracy?interval=1h&limit=3")
+    assert resp.status_code == 200
+    body = resp.json
+    assert body["limit"] == 3
+    assert body["count"] == 3
+    assert len(body["points"]) == 3
+    # The trimmed points must be the 3 most recent (chronologically last), not the first 3.
+    assert body["points"][-1]["timestamp"] == repository.iso_utc(stored[-1]["timestamp"])
+
+
+def test_l2_tvls(client, requests_mock):
+    requests_mock.get(
+        "https://api.llama.fi/v2/chains",
+        json=[
+            {"name": "Arbitrum", "tvl": 400_000_000},
+            {"name": "Base", "tvl": 10_000_000},
+            {"name": "Unrelated Chain", "tvl": 999_000_000},
+        ],
+    )
+    resp = client.get("/api/l2")
+    assert resp.status_code == 200
+    chains = resp.json["chains"]
+    names = [c["name"] for c in chains]
+    assert "Unrelated Chain" not in names
+    assert names[0] == "Arbitrum"
+    assert chains[0]["tier"] == "established"
+    assert next(c for c in chains if c["name"] == "Base")["tier"] == "emerging"
 
 
 def test_gas_not_configured(client, monkeypatch):

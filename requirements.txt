@@ -9,8 +9,9 @@ pymongo==4.8.0
 
 # --- ML / data ---
 pandas==2.2.2
-numpy==1.26.4
+numpy==2.4.6
 scikit-learn==1.5.1
+scipy==1.17.1
 
 # --- NLP ---
 vaderSentiment==3.3.2
@@ -18,10 +19,9 @@ feedparser==6.0.11
 
 # --- Optional forecasting backends (install manually if you want them) ---
 # prophet==1.1.5
-# tensorflow==2.17.0
 
 # --- Optional narrative summary via Claude ---
-# anthropic==0.34.0
+# anthropic==1.4.0
 
 # --- Dev / tests ---
 pytest==8.3.2

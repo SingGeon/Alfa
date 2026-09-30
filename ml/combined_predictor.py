@@ -48,55 +48,81 @@ def compute_confidence(predictions: list[dict], sentiment_avg: float) -> float:
     return round(min(100.0, max(0.0, base_confidence + agreement_adjustment)), 1)
 
 
-def _template_narrative(predictions: list[dict], sentiment_avg: float, headlines: list[str]) -> str:
-    """Rule-based fallback narrative, used when no Claude API key is configured."""
-    if not predictions:
-        return "Date insuficiente pentru o predictie."
-    first, last = predictions[0]["predicted_price"], predictions[-1]["predicted_price"]
-    direction = "creasca" if last >= first else "scada"
-    pct = abs(last - first) / first * 100
-    mood = "pozitiv" if sentiment_avg > 0.05 else ("negativ" if sentiment_avg < -0.05 else "neutru")
+def _template_narrative(
+    last_known_price: float, predicted_price: float, sentiment_avg: float, headlines: list[str], lang: str = "en",
+) -> str:
+    """Rule-based fallback narrative, used when no Claude API key is
+    configured. Pure string formatting on numbers already computed by the
+    caller - no re-running of any model, so a `lang` toggle is instant.
+    """
+    if lang == "ro":
+        direction = "creasca" if predicted_price >= last_known_price else "scada"
+        pct = abs(predicted_price - last_known_price) / last_known_price * 100 if last_known_price else 0.0
+        mood = "pozitiv" if sentiment_avg > 0.05 else ("negativ" if sentiment_avg < -0.05 else "neutru")
+        lines = [
+            f"Modelul tehnic estimeaza ca pretul ETH va {direction} cu aproximativ {pct:.2f}% "
+            f"maine fata de pretul curent, pornind de la tendinta recenta a preturilor istorice.",
+            f"Sentimentul din stiri este in medie {mood} (scor {sentiment_avg:.2f}), pe baza celor "
+            f"{len(headlines)} articole recente analizate.",
+        ]
+        if headlines:
+            lines.append("Titluri recente relevante: " + "; ".join(headlines[:3]))
+        return " ".join(lines)
+
+    direction = "rise" if predicted_price >= last_known_price else "fall"
+    pct = abs(predicted_price - last_known_price) / last_known_price * 100 if last_known_price else 0.0
+    mood = "positive" if sentiment_avg > 0.05 else ("negative" if sentiment_avg < -0.05 else "neutral")
     lines = [
-        f"Modelul tehnic estimeaza ca pretul ETH va {direction} cu aproximativ {pct:.2f}% "
-        f"pe orizontul analizat, pornind de la tendinta recenta a preturilor istorice.",
-        f"Sentimentul din stiri este in medie {mood} (scor {sentiment_avg:.2f}), pe baza celor "
-        f"{len(headlines)} articole recente analizate.",
+        f"The technical model estimates ETH's price will {direction} by about {pct:.2f}% "
+        f"tomorrow relative to the current price, based on the recent trend in historical prices.",
+        f"News sentiment is on average {mood} (score {sentiment_avg:.2f}), based on the "
+        f"{len(headlines)} recent articles analyzed.",
     ]
     if headlines:
-        lines.append("Titluri recente relevante: " + "; ".join(headlines[:3]))
+        lines.append("Relevant recent headlines: " + "; ".join(headlines[:3]))
     return " ".join(lines)
 
 
-def generate_narrative_summary(predictions: list[dict], sentiment_avg: float, recent_articles: list[dict]) -> str:
-    """Daily narrative summary ("why the model thinks price will move").
+def generate_narrative_summary(
+    last_known_price: float, predicted_price: float, sentiment_avg: float, recent_articles: list[dict],
+    lang: str = "en",
+) -> str:
+    """Daily narrative summary ("why the model thinks tomorrow's price will move").
+
+    Takes the same single next-day (interval="1d", steps=1) prediction as
+    the dashboard's "24h prediction" outlook tile (see api.services.
+    run_combined_summary) - not a multi-step trend - so the two can never
+    contradict each other the way they could before, when this narrative
+    was built from whichever interval the main chart happened to be
+    showing (a 24-*hour* trend at "1h", a nonsensical 24-*day* one if the
+    chart was on "1d"/"1w") while the tile was always about tomorrow.
 
     Uses Claude when ANTHROPIC_API_KEY is set, otherwise a deterministic
-    rule-based template so this endpoint never hard-fails.
+    rule-based template so this endpoint never hard-fails. `lang` ("en" or
+    "ro") is pure output-language selection over the same already-computed
+    numbers - never triggers a re-prediction.
     """
     headlines = [a["title"] for a in recent_articles[:5]]
 
     if not config.ANTHROPIC_API_KEY:
-        return _template_narrative(predictions, sentiment_avg, headlines)
+        return _template_narrative(last_known_price, predicted_price, sentiment_avg, headlines, lang)
 
     try:
         import anthropic
     except ImportError:
         logger.warning("ANTHROPIC_API_KEY set but `anthropic` package not installed; using template narrative")
-        return _template_narrative(predictions, sentiment_avg, headlines)
+        return _template_narrative(last_known_price, predicted_price, sentiment_avg, headlines, lang)
 
-    if not predictions:
-        return _template_narrative(predictions, sentiment_avg, headlines)
-
-    first, last = predictions[0]["predicted_price"], predictions[-1]["predicted_price"]
+    language_name = "Romanian" if lang == "ro" else "English"
     prompt = (
-        "Esti un analist crypto. Scrie un rezumat narativ scurt (3-4 propozitii, in limba romana) "
-        "care explica de ce un model de predictie ar putea anticipa evolutia pretului Ethereum, "
-        "pe baza urmatoarelor date:\n\n"
-        f"- Pret prezis la inceputul orizontului: {first:.2f} USD\n"
-        f"- Pret prezis la finalul orizontului: {last:.2f} USD\n"
-        f"- Scor mediu de sentiment din stiri (-1..1): {sentiment_avg:.2f}\n"
-        f"- Titluri recente: {'; '.join(headlines) if headlines else 'niciunul disponibil'}\n\n"
-        "Fii concis, nu da sfaturi financiare, mentioneaza explicit ca este o estimare informativa."
+        f"You are a crypto analyst. Write a short narrative summary (3-4 sentences, in {language_name}) "
+        "explaining why a prediction model might anticipate Ethereum's price movement tomorrow, "
+        "based on the following data:\n\n"
+        f"- Current price: {last_known_price:.2f} USD\n"
+        f"- Predicted price tomorrow: {predicted_price:.2f} USD\n"
+        f"- Average news sentiment score (-1..1): {sentiment_avg:.2f}\n"
+        f"- Recent headlines: {'; '.join(headlines) if headlines else 'none available'}\n\n"
+        "Be concise, don't give financial advice, and explicitly mention that this is an informational estimate."
     )
     try:
         client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
@@ -108,4 +134,4 @@ def generate_narrative_summary(predictions: list[dict], sentiment_avg: float, re
         return response.content[0].text
     except Exception as exc:  # network/auth errors shouldn't break the dashboard
         logger.warning("Claude narrative generation failed (%s); using template narrative", exc)
-        return _template_narrative(predictions, sentiment_avg, headlines)
+        return _template_narrative(last_known_price, predicted_price, sentiment_avg, headlines, lang)

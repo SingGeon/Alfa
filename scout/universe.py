@@ -164,13 +164,18 @@ def get_stock_universe(limit: int = 40) -> list[dict]:
     """Real, live Yahoo Finance screeners for small/growth names - see module docstring."""
     import yfinance as yf
 
+    from scout import retry_yfinance
+
     seen: set[str] = set()
     universe: list[dict] = []
     for screen_id in _STOCK_SCREENS:
-        try:
-            result = yf.screen(screen_id, count=25)
-        except Exception as exc:
-            logger.warning("Yahoo screen %r failed: %s", screen_id, exc)
+        result = retry_yfinance(
+            lambda sid=screen_id: yf.screen(sid, count=25),
+            is_empty=lambda r: not r or not r.get("quotes"),
+            label=f"screen({screen_id})",
+        )
+        if not result:
+            logger.warning("Yahoo screen %r came back empty after retries", screen_id)
             continue
         for quote in result.get("quotes", []):
             symbol = quote.get("symbol")
@@ -203,12 +208,17 @@ def get_stock_mega_cap_universe(limit: int = 25) -> list[dict]:
     """
     import yfinance as yf
 
+    from scout import retry_yfinance
+
     seen: set[str] = set()
     universe: list[dict] = []
-    try:
-        result = yf.screen("day_gainers", count=50)
-    except Exception as exc:
-        logger.warning("Yahoo day_gainers screen failed: %s", exc)
+    result = retry_yfinance(
+        lambda: yf.screen("day_gainers", count=50),
+        is_empty=lambda r: not r or not r.get("quotes"),
+        label="screen(day_gainers)",
+    )
+    if not result:
+        logger.warning("Yahoo day_gainers screen came back empty after retries")
         return []
     for quote in result.get("quotes", []):
         symbol = quote.get("symbol")
