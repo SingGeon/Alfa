@@ -461,3 +461,47 @@ def test_stats_endpoint_filters_and_prediction_days(client, requests_mock):
     assert [r["created_day"] for r in body["by_created_day"]] == ["2026-09-29"]
     days = client.get("/api/evaluation/prediction-days").json["days"]
     assert days == [{"day": "2026-09-29", "predictions": 3}]
+
+
+# --- step-by-step scoring vs "no change" ----------------------------------------
+
+def test_scores_filled_step_by_step_and_final(requests_mock):
+    pid = _log()  # forecast 3010, 3020, 3030 (band +-20), price at prediction 3000
+    requests_mock.get(BINANCE_KLINES, json=[_kline(T0 + timedelta(hours=1), 3005.0)])
+    evaluator.complete_pending_predictions(now=T0 + timedelta(hours=2, minutes=1))
+    partial = storage.get_prediction(pid)
+    assert partial["status"] == "pending" and partial["steps_scored"] == 1
+    assert partial["skill_score"] == pytest.approx(0.0)  # both 5 away from 3005
+
+    requests_mock.get(BINANCE_KLINES, json=[
+        _kline(T0 + timedelta(hours=i + 1), c) for i, c in enumerate((3005.0, 3015.0, 3040.0))
+    ])
+    evaluator.complete_pending_predictions(now=T0 + timedelta(hours=10))
+    done = storage.get_prediction(pid)
+    model = (5 / 3005 + 5 / 3015 + 10 / 3040) / 3 * 100
+    base = (5 / 3005 + 15 / 3015 + 40 / 3040) / 3 * 100
+    assert done["status"] == "completed" and done["steps_scored"] == 3
+    assert done["skill_score"] == pytest.approx(1 - model / base, abs=1e-4)
+    assert done["band_coverage"] == pytest.approx(1.0)
+
+
+def test_step_stats_and_pooled_skill(requests_mock):
+    _complete_one(requests_mock)
+    steps = stats.step_stats()
+    assert [s["step"] for s in steps] == [1, 2, 3]
+    assert steps[2]["mae_baseline_pct"] == pytest.approx(40 / 3040 * 100, abs=1e-3)
+    assert steps[2]["skill_score"] > 0
+    overall = storage.grouped_stats()[0]
+    assert overall["scored"] == 1 and overall["skill_score"] > 0 and overall["band_coverage_pct"] == 100.0
+
+
+def test_diagnostics_stored_and_served(client):
+    pid = storage.log_prediction(
+        interval="1h", model_name="sklearn-tuned", price_at_prediction=3000.0,
+        predictions=[{"timestamp": (T0 + timedelta(hours=1)).isoformat(), "predicted_price": 3001, "lower": 2990, "upper": 3010}],
+        confidence=60.0, signal="wait", created_at=T0, diagnostics={"method": "direct", "horizons": [{"h": 1, "alpha": 0.1}]},
+    )
+    body = client.get(f"/api/evaluation/predictions/{pid}/diagnostics").json
+    assert body["diagnostics"]["horizons"][0]["alpha"] == 0.1
+    row = client.get("/api/evaluation/predictions").json["rows"][0]
+    assert "diagnostics" not in row

@@ -21,7 +21,7 @@ const state = {
   useSentiment: true,
   historyLimit: DEFAULT_HISTORY_LIMIT,
   chartType: "candles",
-  indicators: { sma: false, ema: false, bollinger: false, fibonacci: false, vwap: false, patterns: false },
+  indicators: { sma: false, ema: false, bollinger: false, fibonacci: false, vwap: false, patterns: false, box: false },
   backend: "sklearn",
   // "tuned" (regularized GBR, better average error) vs "legacy" (sklearn's
   // own defaults, the original model) - see ml/price_predictor.py's
@@ -55,6 +55,16 @@ const els = {
   backend: document.getElementById("backend"),
   sentimentContribution: document.getElementById("sentimentContribution"),
   recalibratedHint: document.getElementById("recalibratedHint"),
+  evolutionCard: document.getElementById("evolutionCard"),
+  evoMood: document.getElementById("evoMood"),
+  evoStats: document.getElementById("evoStats"),
+  evoTrack: document.getElementById("evoTrack"),
+  evoTrackNote: document.getElementById("evoTrackNote"),
+  evoLeaders: document.getElementById("evoLeaders"),
+  evoUsage: document.getElementById("evoUsage"),
+  evoSurvival: document.getElementById("evoSurvival"),
+  evoSentiment: document.getElementById("evoSentiment"),
+  evoMoodChart: document.getElementById("evoMoodChart"),
   backtestHint: document.getElementById("backtestHint"),
   outlookDailyPct: document.getElementById("outlookDailyPct"),
   outlookDailyTarget: document.getElementById("outlookDailyTarget"),
@@ -91,6 +101,12 @@ const els = {
   explainText: document.getElementById("explainText"),
   patternAlert: document.getElementById("patternAlert"),
   patternLegendItem: document.getElementById("patternLegendItem"),
+  boxPanel: document.getElementById("boxPanel"),
+  boxChoice: document.getElementById("boxChoice"),
+  boxBoxStats: document.getElementById("boxBoxStats"),
+  boxStatus: document.getElementById("boxStatus"),
+  boxStats: document.getElementById("boxStats"),
+  boxLegendItem: document.getElementById("boxLegendItem"),
   explainClose: document.getElementById("explainClose"),
   l2Rows: document.getElementById("l2Rows"),
 };
@@ -125,6 +141,16 @@ let closePriceSeries, smaSeries, emaSeries, bbUpperSeries, bbMiddleSeries, bbLow
 let patternUpperSeries, patternLowerSeries;
 let fibPriceLines = [];
 let patternPriceLines = [];
+let boxSeries = [];        // one fill (baseline) + one floor line series per drawn box
+let boxPriceLines = [];
+// Patterns and Box Breakout both mark candles; Lightweight Charts keeps a
+// single marker list per series, so each overlay owns its own set here.
+const markerSets = { patterns: [], box: [] };
+
+function applyMarkers() {
+  if (!candleSeries) return;
+  candleSeries.setMarkers([...markerSets.patterns, ...markerSets.box].sort((a, b) => a.time - b.time));
+}
 let lastSortedCandles = [];
 let lastTotalBars = null;
 let forceFullView = false;
@@ -694,7 +720,8 @@ function clearPatternOverlay() {
   patternLowerSeries.applyOptions({ visible: false });
   patternUpperSeries.setData([]);
   patternLowerSeries.setData([]);
-  candleSeries.setMarkers([]);
+  markerSets.patterns = [];
+  applyMarkers();
   els.patternAlert.hidden = true;
   els.patternLegendItem.hidden = true;
 }
@@ -751,7 +778,8 @@ async function loadPatterns() {
         text: p.name,
       }))
       .sort((a, b) => a.time - b.time); // Lightweight Charts requires markers in ascending time order.
-    candleSeries.setMarkers(markers);
+    markerSets.patterns = markers;
+    applyMarkers();
 
     const series = getActivePriceSeries();
     patternPriceLines.forEach((line) => series.removePriceLine(line));
@@ -798,6 +826,289 @@ async function loadPatterns() {
     renderPatternAlert(data.candlestick, top);
   } catch (exc) {
     clearPatternOverlay();
+  }
+}
+
+// -- Box Breakout strategy (ml/box_breakout.py) --------------------------
+//
+// Each box is a Baseline series whose base is the floor and whose line is
+// the ceiling, so the area between them is filled; a separate line marks
+// the floor. Green/red: broke out up/down (grey: without volume, no
+// trade), blue: still active. Entries/exits are markers, the open trade's
+// entry/stop/target are price lines.
+
+const BOX_MAX_DRAWN = 40;
+const BOX_EXIT_LABEL = { stop: "SL", target: "TP", trail_stop: "Trail", reverse: "Rev" };
+
+function boxColor(b) {
+  if (!b.breakout) return COLORS.pred;
+  if (!b.volume_confirmed) return COLORS.text;
+  return b.breakout === "up" ? COLORS.up : COLORS.down;
+}
+
+function withAlpha(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+function clearBoxDrawing() {
+  boxSeries.forEach((s) => chart.removeSeries(s));
+  boxSeries = [];
+  const series = getActivePriceSeries();
+  boxPriceLines.forEach((line) => series.removePriceLine(line));
+  boxPriceLines = [];
+  markerSets.box = [];
+  applyMarkers();
+}
+
+function clearBoxOverlay() {
+  if (!chart) return;
+  clearBoxDrawing();
+  els.boxPanel.hidden = true;
+  els.boxLegendItem.hidden = true;
+}
+
+function drawBoxes(data) {
+  clearBoxDrawing();
+  const hidden = { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+  data.boxes.slice(-BOX_MAX_DRAWN).forEach((b) => {
+    const color = boxColor(b);
+    const from = toUnixSeconds(b.start_time);
+    const to = toUnixSeconds(b.breakout ? b.end_time : data.last_time);
+    if (to <= from) return;
+    const fill = chart.addBaselineSeries({
+      ...hidden, lineWidth: 1, baseValue: { type: "price", price: b.floor },
+      topLineColor: color, topFillColor1: withAlpha(color, 0.16), topFillColor2: withAlpha(color, 0.16),
+      bottomLineColor: color, bottomFillColor1: "transparent", bottomFillColor2: "transparent",
+    });
+    fill.setData([{ time: from, value: b.ceiling }, { time: to, value: b.ceiling }]);
+    const floor = chart.addLineSeries({ ...hidden, color, lineWidth: 1 });
+    floor.setData([{ time: from, value: b.floor }, { time: to, value: b.floor }]);
+    boxSeries.push(fill, floor);
+  });
+
+  const markers = [];
+  data.trades.forEach((tr) => {
+    const long = tr.side === "long";
+    markers.push({
+      time: toUnixSeconds(tr.entry_time), position: long ? "belowBar" : "aboveBar",
+      color: long ? COLORS.up : COLORS.down, shape: long ? "arrowUp" : "arrowDown",
+      text: long ? "Long" : "Short",
+    });
+    if (tr.exit_time) {
+      markers.push({
+        time: toUnixSeconds(tr.exit_time), position: long ? "aboveBar" : "belowBar",
+        color: tr.return_pct > 0 ? COLORS.up : COLORS.down, shape: "circle",
+        text: `${BOX_EXIT_LABEL[tr.exit_reason] || "Exit"} ${tr.return_pct > 0 ? "+" : ""}${tr.return_pct.toFixed(1)}%`,
+      });
+    }
+  });
+  markerSets.box = markers;
+  applyMarkers();
+
+  const open = data.open_trade;
+  if (open) {
+    const series = getActivePriceSeries();
+    const line = (price, color, title) => boxPriceLines.push(series.createPriceLine({
+      price, color, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title,
+    }));
+    line(open.entry_price, COLORS.pred, t("dashboard.box.entryTitle"));
+    line(open.stop, COLORS.down, t("dashboard.box.stopTitle"));
+    if (open.target != null) line(open.target, COLORS.up, t("dashboard.box.targetTitle"));
+  }
+}
+
+function fmtPct(v, signed = true) {
+  if (v === null || v === undefined) return "—";
+  return `${signed && v > 0 ? "+" : ""}${Number(v).toFixed(2)}%`;
+}
+
+function renderBoxChoice(data) {
+  const cur = data.current;
+  const s = cur.settings;
+  const next = tf("dashboard.box.nextCheck", { n: Math.max(1, data.next_reopt_in_bars) });
+  if (!s) {
+    els.boxChoice.innerHTML = `<b>${t("dashboard.box.standingAside")}</b> ${tf("dashboard.box.standingAsideWhy", { n: data.train_bars })} ${next}`;
+    return;
+  }
+  const exit = s.exit_mode === "trail" ? t("dashboard.box.exitTrailShort") : tf("dashboard.box.exitRrShort", { rr: s.rr });
+  els.boxChoice.innerHTML = `${tf("dashboard.box.chosen", { x: s.lookback, y: s.padding, exit })} ${tf("dashboard.box.chosenWhy", {
+    n: data.train_bars, ret: fmtPct(cur.train_return_pct), trades: cur.train_trades, candidates: cur.candidates,
+  })} ${next}`;
+}
+
+function renderBoxPanel(data) {
+  renderBoxChoice(data);
+  const st = data.stats;
+  const parts = [];
+  const open = data.open_trade;
+  if (open) {
+    parts.push(tf(open.side === "long" ? "dashboard.box.openLong" : "dashboard.box.openShort", {
+      entry: fmtMoney(open.entry_price), stop: fmtMoney(open.stop),
+      target: open.target != null ? fmtMoney(open.target) : t("dashboard.box.trailing"),
+      pnl: fmtPct(open.return_pct),
+    }));
+  }
+  const box = data.active_box;
+  if (box) {
+    parts.push(tf("dashboard.box.activeBox", { floor: fmtMoney(box.floor), ceiling: fmtMoney(box.ceiling) }));
+  } else if (!open) {
+    parts.push(t("dashboard.box.noBox"));
+  }
+  els.boxStatus.innerHTML = parts.map((p) => `<div>${p}</div>`).join("");
+
+  const cell = (label, value, cls = "") => `<div class="box-stat"><span>${label}</span><b class="${cls}">${value}</b></div>`;
+  const sign = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
+  els.boxStats.innerHTML = [
+    cell(t("dashboard.box.statTrades"), `${st.trades}${st.open_trades ? ` (+${st.open_trades})` : ""}`),
+    cell(t("dashboard.box.statWinRate"), st.win_rate_pct == null ? "—" : `${st.win_rate_pct.toFixed(1)}%`),
+    cell(t("dashboard.box.statReturn"), fmtPct(st.total_return_pct), sign(st.total_return_pct)),
+    cell(t("dashboard.box.statBuyHold"), fmtPct(st.buy_hold_pct), sign(st.buy_hold_pct)),
+    cell(t("dashboard.box.statProfitFactor"), st.profit_factor == null ? "—" : st.profit_factor.toFixed(2)),
+    cell(t("dashboard.box.statAvgR"), st.avg_r == null ? "—" : `${st.avg_r.toFixed(2)}R`),
+    cell(t("dashboard.box.statDrawdown"), st.max_drawdown_pct ? `-${st.max_drawdown_pct.toFixed(2)}%` : "0%", st.max_drawdown_pct ? "down" : ""),
+  ].join("");
+  const bs = data.box_stats;
+  const traded = data.segments.filter((s) => s.settings).length;
+  const pct = (v) => (v == null ? "—" : `${v.toFixed(1)}%`);
+  els.boxBoxStats.innerHTML = [
+    cell(t("dashboard.box.statBoxes"), bs.boxes),
+    cell(t("dashboard.box.statHeight"), pct(bs.avg_height_pct)),
+    cell(t("dashboard.box.statDuration"), bs.avg_duration_bars == null ? "—" : tf("dashboard.box.candles", { n: Math.round(bs.avg_duration_bars) })),
+    cell(t("dashboard.box.statUpDown"), `${bs.breakouts_up} / ${bs.breakouts_down}`),
+    cell(t("dashboard.box.statVolume"), pct(bs.volume_confirmed_pct)),
+    cell(t("dashboard.box.statFollow"), pct(bs.follow_through_pct)),
+    cell(t("dashboard.box.statInMarket"), `${traded} / ${data.segments.length}`),
+  ].join("");
+  els.boxPanel.hidden = false;
+  els.boxLegendItem.hidden = false;
+}
+
+async function loadBoxBreakout() {
+  if (!state.indicators.box) {
+    clearBoxOverlay();
+    return;
+  }
+  try {
+    const data = await apiGet("/api/box-breakout", { interval: state.interval });
+    drawBoxes(data);
+    renderBoxPanel(data);
+  } catch (exc) {
+    clearBoxDrawing();
+    els.boxPanel.hidden = false;
+    els.boxStats.innerHTML = "";
+    els.boxBoxStats.innerHTML = "";
+    els.boxChoice.textContent = "";
+    els.boxStatus.textContent = exc.message;
+  }
+}
+
+// -- Evolving model population ("tuned", ml/evolution.py) -----------------
+
+const EMOTION_EMOJI = { fear: "😨", caution: "🤔", calm: "😐", confidence: "🙂", euphoria: "🤩" };
+
+function emotionLabel(name) {
+  return `${EMOTION_EMOJI[name] || ""} ${t(`dashboard.evo.emotion.${name}`)}`;
+}
+
+function renderEvolution(evo) {
+  if (!evo) {
+    els.evolutionCard.hidden = true;
+    return;
+  }
+  els.evolutionCard.hidden = false;
+  if (evo.newborn) {
+    els.evoMood.textContent = "";
+    els.evoStats.innerHTML = `<div class="box-stat"><span>${t("dashboard.evo.newbornTitle")}</span><b>${t("dashboard.evo.newborn")}</b></div>`;
+    els.evoLeaders.innerHTML = "";
+    els.evoUsage.innerHTML = "";
+    els.evoSurvival.innerHTML = "";
+    els.evoSentiment.textContent = "";
+    els.evoMoodChart.innerHTML = "";
+    els.evoTrack.innerHTML = "";
+    els.evoTrackNote.textContent = "";
+    return;
+  }
+  els.evoMood.textContent = emotionLabel(evo.emotion);
+  els.evoMood.className = `evo-mood ${evo.emotion}`;
+
+  const cell = (label, value) => `<div class="box-stat"><span>${label}</span><b>${value}</b></div>`;
+  els.evoStats.innerHTML = [
+    cell(t("dashboard.evo.alive"), evo.population),
+    cell(t("dashboard.evo.generation"), evo.max_generation),
+    cell(t("dashboard.evo.births"), evo.births),
+    cell(t("dashboard.evo.deaths"), evo.deaths),
+    cell(t("dashboard.evo.deathsRecent"), evo.deaths_last_100),
+    cell(t("dashboard.evo.lifespan"), evo.avg_lifespan_of_dead == null ? "—" : tf("dashboard.box.candles", { n: Math.round(evo.avg_lifespan_of_dead) })),
+    cell(t("dashboard.evo.band"), t(evo.band_calibrated ? "dashboard.evo.bandYes" : "dashboard.evo.bandNo")),
+  ].join("");
+
+  // Skill: 1 - (vote's error / "no change" error); above 0 = it beat a flat line.
+  const skillCell = (v) => (v == null ? "—" : `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%</span>`);
+  const dirCell = (v) => (v == null ? "—" : `<span class="${v > 50 ? "up" : v < 50 ? "down" : ""}">${v.toFixed(1)}%</span>`);
+  els.evoTrackNote.textContent = evo.lived_from
+    ? tf("dashboard.evo.trackNote", { from: new Date(evo.track_from || evo.lived_from).toLocaleDateString(), n: evo.candles_lived.toLocaleString() })
+    : "";
+  els.evoTrack.innerHTML = (evo.track_record || []).map((r) => `
+    <tr>
+      <td>${tf("dashboard.box.candles", { n: r.h })}</td>
+      <td>${r.n.toLocaleString()}</td>
+      <td>${skillCell(r.skill)}</td>
+      <td>${dirCell(r.direction_pct)}</td>
+      <td>${skillCell(r.recent_skill)}</td>
+      <td>${dirCell(r.recent_direction_pct)}</td>
+    </tr>`).join("");
+
+  const maxEnergy = Math.max(...evo.leaders.map((o) => o.energy), 1);
+  els.evoLeaders.innerHTML = evo.leaders.map((o) => `
+    <tr>
+      <td>${o.id}</td>
+      <td>${emotionLabel(o.emotion)}</td>
+      <td><span class="evo-energy"><i style="width:${Math.max(4, (o.energy / maxEnergy) * 100)}%"></i></span> ${Math.round(o.energy)}</td>
+      <td>${o.age}</td>
+      <td>${o.generation}</td>
+      <td>${o.combos ?? 0}</td>
+      <td><span class="${o.news_effect > 0.005 ? "up" : o.news_effect < -0.005 ? "down" : ""}">${o.news_effect > 0 ? "+" : ""}${Math.round((o.news_effect || 0) * 100)}%</span></td>
+      <td class="evo-inputs">${o.inputs.map((g) => t(`dashboard.evo.input.${g}`)).join(", ")}</td>
+    </tr>`).join("");
+
+  els.evoUsage.innerHTML = Object.entries(evo.input_usage)
+    .sort((a, b) => b[1] - a[1])
+    .map(([g, share]) => `
+      <div class="evo-usage-row">
+        <span>${t(`dashboard.evo.input.${g}`)}</span>
+        <span class="evo-energy"><i style="width:${share * 100}%"></i></span>
+        <b>${Math.round(share * 100)}%</b>
+      </div>`).join("");
+
+  const ms = evo.market_sentiment;
+  els.evoSentiment.textContent = ms && ms.source
+    ? tf("dashboard.evo.sentimentNow", {
+      value: `${ms.value > 0 ? "+" : ""}${ms.value.toFixed(2)}`,
+      source: t(ms.source === "news" ? "dashboard.evo.sourceNews" : "dashboard.evo.sourceFearGreed"),
+      sens: evo.avg_news_sensitivity == null ? "—" : `${evo.avg_news_sensitivity > 0 ? "+" : ""}${evo.avg_news_sensitivity.toFixed(2)}`,
+    })
+    : t("dashboard.evo.sentimentNone");
+
+  const surv = Object.entries(evo.gene_survival || {}).sort((a, b) => b[1].avg_lifespan - a[1].avg_lifespan);
+  const maxLife = Math.max(...surv.map(([, v]) => v.avg_lifespan), 1);
+  els.evoSurvival.innerHTML = surv.map(([g, v]) => `
+      <div class="evo-usage-row">
+        <span>${t(`dashboard.evo.input.${g}`)}</span>
+        <span class="evo-energy"><i style="width:${(v.avg_lifespan / maxLife) * 100}%"></i></span>
+        <b>${Math.round(v.avg_lifespan)}</b>
+      </div>`).join("");
+
+  // Mood timeline: 0 (fear) at the bottom, 1 (euphoria) at the top, the
+  // dashed line is 0.5 ("no better than no change").
+  const hist = evo.history || [];
+  if (hist.length > 1) {
+    const pts = hist.map((h, i) => `${(i / (hist.length - 1)) * 300},${60 - h.mood * 60}`).join(" ");
+    els.evoMoodChart.innerHTML = `
+      <line x1="0" y1="30" x2="300" y2="30" class="evo-mid" />
+      <polyline points="${pts}" class="evo-line" />`;
+  } else {
+    els.evoMoodChart.innerHTML = "";
   }
 }
 
@@ -1091,6 +1402,7 @@ async function loadChart() {
     // static setting - the model actually retrains from scratch (fresh
     // sentiment + price data) every time the cache expires, not once ever.
     els.recalibratedHint.textContent = tf("dashboard.recalibrated", { time: fmtElapsed(prediction.trained_ago_seconds) });
+    renderEvolution(prediction.evolution);
 
     if (prediction.predictions.length) {
       const basePrice = prediction.last_known_price;
@@ -1138,6 +1450,7 @@ async function loadChart() {
     els.backend.textContent = "—";
     els.sentimentContribution.textContent = t("dashboard.sentiment.dash");
     els.recalibratedHint.textContent = "—";
+    renderEvolution(null);
     els.predictionRows.innerHTML = `<tr class="empty-row"><td colspan="3">—</td></tr>`;
     els.trendPct.textContent = "—";
     els.trendPct.className = "summary-value";
@@ -1601,7 +1914,7 @@ async function loadAll() {
   await Promise.all([
     loadCurrentPrice(), loadChart(), loadOutlook(), loadSummary(), loadNews(), loadGas(),
     loadPinnedTicker(), accuracyPanelSklearn.load(), loadL2Panel(), loadBacktestHint(), loadPatterns(),
-    loadSignalAccuracy(),
+    loadBoxBreakout(), loadSignalAccuracy(),
   ]);
   els.updated.textContent = tf("dashboard.updated.template", { time: new Date().toLocaleTimeString("en-US") });
 }
@@ -1700,6 +2013,7 @@ els.indicatorsGroup.addEventListener("change", (e) => {
   state.indicators[input.dataset.indicator] = input.checked;
   updateIndicatorSeries(lastSortedCandles);
   if (input.dataset.indicator === "patterns") loadPatterns();
+  if (input.dataset.indicator === "box") loadBoxBreakout();
 });
 
 els.explainBtn.addEventListener("click", toggleExplainPanel);

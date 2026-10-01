@@ -90,6 +90,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     columns = {r[1] for r in conn.execute("PRAGMA table_info(predictions)")}
     if "history_path" not in columns:
         conn.execute("ALTER TABLE predictions ADD COLUMN history_path TEXT NOT NULL DEFAULT '[]'")
+    for name, sql_type in _SCORE_COLUMNS.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE predictions ADD COLUMN {name} {sql_type}")
+    if "diagnostics" not in columns:
+        conn.execute("ALTER TABLE predictions ADD COLUMN diagnostics TEXT")
+
+
+# Written by set_scores() (see evaluation/evaluator.py score_path).
+_SCORE_COLUMNS = {
+    "steps_scored": "INTEGER", "mae_model_pct": "REAL", "mae_baseline_pct": "REAL",
+    "skill_score": "REAL", "band_coverage": "REAL",
+}
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -97,6 +109,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d["predicted_path"] = json.loads(d["predicted_path"] or "[]")
     d["actual_path"] = json.loads(d["actual_path"] or "[]")
     d["history_path"] = json.loads(d.get("history_path") or "[]")
+    d["diagnostics"] = json.loads(d["diagnostics"]) if d.get("diagnostics") else None
     if d.get("direction_correct") is not None:
         d["direction_correct"] = bool(d["direction_correct"])
     return d
@@ -112,6 +125,7 @@ def log_prediction(
     signal: str | None,
     history: list[dict] | None = None,
     created_at: datetime | None = None,
+    diagnostics: dict | None = None,
 ) -> int | None:
     """Record one prediction; returns its id, or None if it was skipped.
 
@@ -174,13 +188,14 @@ def log_prediction(
             """INSERT OR IGNORE INTO predictions (
                    created_at, interval, model_name, price_at_prediction, horizon_steps,
                    target_time, resolved_at, predicted_path, predicted_final_price,
-                   confidence, signal, history_path
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   confidence, signal, history_path, diagnostics
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 created_iso, interval, model_name, float(price_at_prediction), len(path),
                 to_iso(target_time), to_iso(target_time + delta), json.dumps(path),
                 path[-1]["price"], confidence, SIGNAL_LABELS.get(signal, signal),
                 json.dumps(history or []),
+                json.dumps(diagnostics, default=float) if diagnostics else None,
             ),
         )
         return cur.lastrowid if cur.rowcount else None
@@ -227,6 +242,25 @@ def complete_prediction(
                 to_iso(completed_at or datetime.now(timezone.utc)), prediction_id,
             ),
         )
+
+
+def set_scores(prediction_id: int, scores: dict) -> None:
+    """Store evaluator.score_path()'s result (any status)."""
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE predictions SET {', '.join(f'{k} = ?' for k in _SCORE_COLUMNS)} WHERE id = ?",
+            (*(scores.get(k) for k in _SCORE_COLUMNS), prediction_id),
+        )
+
+
+def unscored_with_actuals() -> list[dict]:
+    """Predictions that have real prices but were never scored (logged
+    before score columns existed)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM predictions WHERE steps_scored IS NULL AND actual_path != '[]'"
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def expire_prediction(prediction_id: int, actual_path: list[dict]) -> None:
@@ -313,6 +347,22 @@ def summary_by_model(filters: dict | None = None) -> list[dict]:
     ]
 
 
+def scored_paths(filters: dict | None = None) -> list[dict]:
+    """price_at_prediction + predicted/actual paths of every matching
+    prediction with at least one real candle (for per-step stats)."""
+    where, params = _where(filters or {})
+    extra = " AND " if where else " WHERE "
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT price_at_prediction, predicted_path, actual_path FROM predictions{where}{extra}actual_path != '[]'",
+            params,
+        ).fetchall()
+    return [
+        {"price_at_prediction": r[0], "predicted_path": json.loads(r[1]), "actual_path": json.loads(r[2])}
+        for r in rows
+    ]
+
+
 def list_models() -> list[str]:
     with connect() as conn:
         return [r[0] for r in conn.execute("SELECT DISTINCT model_name FROM predictions ORDER BY model_name")]
@@ -374,6 +424,10 @@ def grouped_stats(group_by: tuple[str, ...] = (), filters: dict | None = None) -
                        AVG(CASE WHEN status = 'completed' THEN pct_error END) AS mean_pct_error,
                        AVG(CASE WHEN status = 'completed' THEN abs_error END) AS mean_abs_error_usd,
                        AVG(CASE WHEN status = 'completed' THEN direction_correct END) AS direction_accuracy,
+                       SUM(steps_scored > 0) AS scored,
+                       AVG(CASE WHEN steps_scored > 0 THEN mae_model_pct END) AS mae_model_pct,
+                       AVG(CASE WHEN steps_scored > 0 THEN mae_baseline_pct END) AS mae_baseline_pct,
+                       AVG(CASE WHEN steps_scored > 0 THEN band_coverage END) AS band_coverage,
                        MIN(created_at) AS first_prediction,
                        MAX(created_at) AS last_prediction
                 FROM predictions{where}{group}""",
@@ -394,6 +448,15 @@ def grouped_stats(group_by: tuple[str, ...] = (), filters: dict | None = None) -
             "mean_pct_error": rnd(r["mean_pct_error"], 3),
             "mean_abs_error_usd": rnd(r["mean_abs_error_usd"], 2),
             "direction_accuracy_pct": rnd(r["direction_accuracy"] * 100 if r["direction_accuracy"] is not None else None, 1),
+            # Step-by-step scores, over every prediction with at least one
+            # real candle so far (pending ones included). skill_score is
+            # pooled: 1 - mean model error / mean "no change" error.
+            "scored": r["scored"] or 0,
+            "mae_model_pct": rnd(r["mae_model_pct"], 3),
+            "mae_baseline_pct": rnd(r["mae_baseline_pct"], 3),
+            "skill_score": rnd(1 - r["mae_model_pct"] / r["mae_baseline_pct"], 3)
+            if r["mae_model_pct"] is not None and r["mae_baseline_pct"] else None,
+            "band_coverage_pct": rnd(r["band_coverage"] * 100 if r["band_coverage"] is not None else None, 1),
             "first_prediction": r["first_prediction"],
             "last_prediction": r["last_prediction"],
         }

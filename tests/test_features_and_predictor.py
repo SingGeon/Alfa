@@ -98,76 +98,75 @@ def test_predictor_unknown_backend_raises():
 
 
 
-# --- confidence band calibration (see ml/price_predictor.py) -----------------
+# --- evolving population ("tuned", ml/evolution.py) ----------------------------
 
-def _fitted_forecast(synthetic_candles, n=300, steps=24):
+def _fitted_forecast(synthetic_candles, n=500, steps=24, variant="tuned"):
     df = build_feature_frame(synthetic_candles(n))
-    predictor = PricePredictor(backend="sklearn", model_variant="tuned").fit(df.dropna())
-    return predictor, predictor.predict(df, steps=steps, interval="1h")
+    predictor = PricePredictor(backend="sklearn", model_variant=variant).fit(df.dropna())
+    preds, diag = predictor.predict_with_diagnostics(df, steps=steps, interval="1h")
+    return predictor, preds, diag
 
 
-def test_band_widens_with_horizon(synthetic_candles):
-    _, out = _fitted_forecast(synthetic_candles)
-    widths = [np.log(p["upper"] / p["lower"]) for p in out]
-    assert all(b > a for a, b in zip(widths, widths[1:]))
-    # half-width grows as k ** BAND_HORIZON_EXPONENT from the step-1 width
-    from ml.price_predictor import BAND_HORIZON_EXPONENT
+def test_tuned_is_an_evolving_population(synthetic_candles):
+    from ml.evolution import POPULATION
 
-    assert widths[-1] / widths[0] == pytest.approx(24 ** BAND_HORIZON_EXPONENT, rel=1e-6)
+    predictor, preds, diag = _fitted_forecast(synthetic_candles)
+    assert predictor._evolution is not None
+    assert len(preds) == 24
+    assert diag["method"] == "evolution"
+    assert diag["population"] == POPULATION
+    assert diag["leaders"] and all(o["voting"] for o in diag["leaders"])
+    assert diag["emotion"] in {"fear", "caution", "calm", "confidence", "euphoria"}
 
 
-def test_point_always_inside_band(synthetic_candles):
-    _, out = _fitted_forecast(synthetic_candles)
-    for p in out:
+def test_tuned_point_inside_band(synthetic_candles):
+    _, preds, _ = _fitted_forecast(synthetic_candles, steps=30)
+    for p in preds:
         assert p["lower"] <= p["predicted_price"] <= p["upper"]
 
 
-def test_conformal_calibration_runs_on_long_history(synthetic_candles):
-    predictor, _ = _fitted_forecast(synthetic_candles, n=300, steps=1)
-    assert predictor._cqr_calibration_rows > 0
-
-
-def test_conformal_calibration_skipped_on_short_history(synthetic_candles):
-    # 130 candles -> ~105 training rows after the 24-candle rolling warm-up: < 120
-    predictor, out = _fitted_forecast(synthetic_candles, n=130, steps=3)
-    assert predictor._cqr_calibration_rows == 0
-    assert predictor._cqr_q == 0.0
-    assert len(out) == 3
-
-
-def test_taker_buy_ratio_stays_real_in_recursion(synthetic_candles):
-    candles = synthetic_candles(200)
-    for i, c in enumerate(candles):
-        c["taker_buy_volume"] = c["volume"] * (0.3 if i % 2 else 0.7)
-    df = build_feature_frame(candles)
-    real_last_ratio = df["taker_buy_ratio"].iloc[-1]
-    assert real_last_ratio != 0.5
-
-    predictor = PricePredictor(backend="sklearn", ensemble_size=1).fit(df.dropna())
-    seen = []
-
-    class Spy:
-        def __init__(self, model):
-            self.model = model
-
-        def predict(self, row):
-            seen.append(float(row["taker_buy_ratio"].iloc[0]))
-            return self.model.predict(row)
-
-    predictor._models = [Spy(m) for m in predictor._models]
-    predictor.predict(df, steps=3, interval="1h")
-    assert seen[0] == pytest.approx(real_last_ratio)  # step 1: the real candle's own value
-    assert seen[1] == pytest.approx(0.5)              # synthetic candles: neutral
-
-
-def test_legacy_variant_keeps_uncalibrated_band(synthetic_candles):
-    # "legacy" is the fixed reference: no CQR, no horizon-scaled band.
+def test_legacy_learns_from_market_context(synthetic_candles):
     df = build_feature_frame(synthetic_candles(300))
-    predictor = PricePredictor(backend="sklearn", model_variant="legacy").fit(df.dropna())
-    out = predictor.predict(df, steps=24, interval="1h")
-    assert predictor._cqr_calibration_rows == 0
-    assert predictor._cqr_q == 0.0
-    widths = [np.log(p["upper"] / p["lower"]) for p in out]
-    from ml.price_predictor import BAND_HORIZON_EXPONENT
+    df["funding"] = np.where(np.arange(len(df)) > 150, 1e-4, np.nan)  # source starts later: NaN -> 0
+    df["fear_greed"] = 0.2
+    predictor = PricePredictor(backend="sklearn", model_variant="legacy").fit(df.dropna(subset=["close"]).dropna(subset=["rsi_14", "lag_24", "volatility_24"]))
+    importances = predictor.get_feature_importance()
+    assert "funding" in importances and "fear_greed" in importances
+    preds = predictor.predict(df, steps=5, interval="1h")
+    assert len(preds) == 5
 
-    assert widths[-1] / widths[0] != pytest.approx(24 ** BAND_HORIZON_EXPONENT, rel=1e-3)
+
+def test_tuned_is_deterministic(synthetic_candles):
+    _, a, _ = _fitted_forecast(synthetic_candles)
+    _, b, _ = _fitted_forecast(synthetic_candles)
+    assert [p["predicted_price"] for p in a] == [p["predicted_price"] for p in b]
+
+
+def test_legacy_stays_recursive_without_diagnostics(synthetic_candles):
+    predictor, preds, diag = _fitted_forecast(synthetic_candles, n=300, variant="legacy")
+    assert predictor._evolution is None
+    assert diag is None
+    assert len(preds) == 24
+
+
+def test_walk_forward_direction_ignores_flat_forecasts():
+    from ml.walk_forward import BacktestResult, WindowResult
+
+    def window(pred, actual):
+        return WindowResult(origin_close=100.0, predicted=[pred], lower=[90.0], upper=[110.0], actual=[actual])
+
+    result = BacktestResult(windows=[
+        window(101.0, 102.0),   # called up, went up
+        window(99.0, 102.0),    # called down, went up
+        window(100.0, 103.0),   # flat: calls no direction
+        window(100.0, 97.0),    # flat
+    ])
+    summary = result.summarize()
+    assert summary["windows"] == 4
+    assert summary["direction_calls"] == 2
+    assert summary["direction_accuracy"] == 0.5
+
+    flat_only = BacktestResult(windows=[window(100.0, 101.0)]).summarize()
+    assert flat_only["direction_calls"] == 0
+    assert flat_only["direction_accuracy"] is None
+    assert flat_only["direction_se"] is None

@@ -47,6 +47,44 @@ def compute_errors(price_at_prediction: float, predicted_final_price: float, act
     }
 
 
+def score_path(pred: dict, actual_path: list[dict]) -> dict:
+    """Step-by-step score over every forecast step that has a real price so
+    far - usable while a prediction is still pending, and final once it
+    completes. The baseline is "no change": price_at_prediction at every
+    step. Errors are in % of the real price, so intervals and price levels
+    are comparable."""
+    actual = {p["timestamp"]: p["price"] for p in actual_path}
+    base = pred["price_at_prediction"]
+    model_err, base_err, inside = [], [], []
+    for p in pred["predicted_path"]:
+        real = actual.get(p["timestamp"])
+        if real is None or not real:
+            continue
+        model_err.append(abs(p["price"] - real) / real * 100)
+        base_err.append(abs(base - real) / real * 100)
+        if p.get("lower") is not None and p.get("upper") is not None:
+            inside.append(p["lower"] <= real <= p["upper"])
+    n = len(model_err)
+    if not n:
+        return {"steps_scored": 0, "mae_model_pct": None, "mae_baseline_pct": None, "skill_score": None, "band_coverage": None}
+    mae_model, mae_base = sum(model_err) / n, sum(base_err) / n
+    return {
+        "steps_scored": n,
+        "mae_model_pct": round(mae_model, 5),
+        "mae_baseline_pct": round(mae_base, 5),
+        "skill_score": round(1 - mae_model / mae_base, 5) if mae_base else None,
+        "band_coverage": round(sum(inside) / len(inside), 5) if inside else None,
+    }
+
+
+def rescore_unscored() -> int:
+    """Score predictions logged before step-by-step scoring existed."""
+    rows = storage.unscored_with_actuals()
+    for pred in rows:
+        storage.set_scores(pred["id"], score_path(pred, pred["actual_path"]))
+    return len(rows)
+
+
 def fetch_binance_candles(interval: str, start: datetime, end: datetime, now: datetime) -> dict[str, dict]:
     """{candle open time (ISO): {"open", "high", "low", "close"}} for every
     *closed* candle opening in [start, end]. Pages through Binance's
@@ -165,6 +203,9 @@ def complete_pending_predictions(now: datetime | None = None) -> dict:
         ]
         actual_path = sorted(pred["actual_path"] + found, key=lambda p: p["timestamp"])
         resolved_at = parse_iso(pred["resolved_at"])
+
+        if found:
+            storage.set_scores(pred["id"], score_path(pred, actual_path))
 
         if now < resolved_at:
             if found:

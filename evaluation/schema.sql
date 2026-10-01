@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS predictions (
     status                TEXT    NOT NULL DEFAULT 'pending'
                           CHECK (status IN ('pending', 'completed', 'expired')),
     completed_at          TEXT,
+    -- Scored step by step as real candles close (evaluation/evaluator.py
+    -- score_path), over every step that has a real price so far:
+    steps_scored          INTEGER,             -- how many forecast steps have a real price
+    mae_model_pct         REAL,                -- mean |forecast - real| / real * 100
+    mae_baseline_pct      REAL,                -- same for "no change" (price_at_prediction)
+    skill_score           REAL,                -- 1 - mae_model / mae_baseline (> 0 = beats "no change")
+    band_coverage         REAL,                -- share of scored steps with the real price inside [lower, upper]
+    -- JSON: the direct forecaster's log (ml/direct_forecast.py) - features,
+    -- clipping, per-horizon alpha/band, per-step path. NULL for other models.
+    diagnostics           TEXT,
     UNIQUE (interval, model_name, created_at)
 );
 

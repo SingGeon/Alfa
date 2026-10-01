@@ -11,7 +11,11 @@ Metrics (see summarize()):
 - coverage of [lower, upper]: at step 1, over the whole trajectory, at the last step
 - last-step error vs the "no change" baseline: mean |log(pred_H / actual_H)|
   divided by mean |log(close_i / actual_H)| (< 1 = beats the baseline)
-- last-step direction accuracy, with its standard error
+- skill over the whole path: 1 - mean |log(pred_k / actual_k)| / the same
+  for "no change", over every step k (> 0 = beats the baseline)
+- last-step direction accuracy, with its standard error, over the windows
+  where the model called a direction (a flat "no change" forecast calls
+  none and is left out; how many did call one is reported as direction_calls)
 - spread of predicted H-step returns vs real ones (a ratio near 0 means the
   forecast has collapsed into a flat "straight line")
 
@@ -28,6 +32,7 @@ import numpy as np
 import pandas as pd
 
 from ml.features import FEATURE_COLUMNS, RELATIVE_FEATURE_COLUMNS, build_feature_frame
+from ml.market_context import CONTEXT_COLUMNS, add_context
 from ml.price_predictor import PricePredictor
 
 
@@ -38,6 +43,11 @@ class WindowResult:
     lower: list[float]
     upper: list[float]
     actual: list[float]
+
+
+# Below this |log return| at the last step a forecast is "no change": it
+# calls no direction, so it can't get one right or wrong.
+_FLAT_LOG_RETURN = 1e-6
 
 
 @dataclass
@@ -55,8 +65,12 @@ class BacktestResult:
         act_h = np.array([math.log(r.actual[-1] / r.origin_close) for r in w])
         model_err = np.abs(pred_h - act_h).mean()
         baseline_err = np.abs(act_h).mean()
-        hits = (np.sign(pred_h) == np.sign(act_h)).astype(float)
-        p = hits.mean()
+        called = np.abs(pred_h) > _FLAT_LOG_RETURN
+        hits = (np.sign(pred_h[called]) == np.sign(act_h[called])).astype(float)
+        n_called = int(called.sum())
+        p = hits.mean() if n_called else None
+        path_err = np.mean([[abs(math.log(pr / a)) for pr, a in zip(r.predicted, r.actual)] for r in w])
+        path_base = np.mean([[abs(math.log(r.origin_close / a)) for a in r.actual] for r in w])
         width_h = np.array([math.log(r.upper[-1] / r.lower[-1]) for r in w])
         width_1 = np.array([math.log(r.upper[0] / r.lower[0]) for r in w])
         return {
@@ -66,8 +80,10 @@ class BacktestResult:
             "coverage_trajectory": round(inside.mean(), 3),
             "coverage_last": round(inside[:, -1].mean(), 3),
             "error_vs_no_change": round(model_err / baseline_err, 3) if baseline_err else None,
-            "direction_accuracy": round(p, 3),
-            "direction_se": round(math.sqrt(p * (1 - p) / n), 3),
+            "skill_path": round(1 - path_err / path_base, 4) if path_base else None,
+            "direction_calls": n_called,
+            "direction_accuracy": round(p, 3) if n_called else None,
+            "direction_se": round(math.sqrt(p * (1 - p) / n_called), 3) if n_called else None,
             "pred_spread_ratio": round(pred_h.std() / act_h.std(), 3) if act_h.std() else None,
             "mean_width_step1_pct": round(width_1.mean() * 100, 3),
             "mean_width_last_pct": round(width_h.mean() * 100, 3),
@@ -92,7 +108,10 @@ def run(
     windows: int,
     min_train: int = 500,
     predictor_factory=lambda: PricePredictor(model_variant="tuned"),
+    context: dict | None = None,
 ) -> BacktestResult:
+    """`context`: market_context sources (see ml/market_context.add_context);
+    they are aligned point-in-time, so passing the full history is safe."""
     btc_close = None
     if btc_candles:
         btc = pd.DataFrame(btc_candles)
@@ -108,8 +127,10 @@ def run(
         # available point-in-time here, and including them would risk leaking
         # later-in-the-day information into earlier candles.
         df = build_feature_frame(history, {}, btc_close=btc_hist, tvl_by_date=None)
+        if context:
+            df = add_context(df, **context)
         predictor = predictor_factory()
-        predictor.fit(df.dropna())
+        predictor.fit(df.dropna(subset=[c for c in df.columns if c not in CONTEXT_COLUMNS]))
         preds = predictor.predict(df, steps=horizon, interval=interval)
         result.windows.append(WindowResult(
             origin_close=float(history[-1]["close"]),
@@ -159,14 +180,21 @@ def main() -> None:
     parser.add_argument("--min-train", type=int, default=500)
     parser.add_argument("--variant", default="tuned", choices=("tuned", "legacy"))
     parser.add_argument("--features", default="price", choices=("price", "relative"))
+    parser.add_argument("--context", action="store_true", help="add market context (Fear & Greed, funding, premium, TVL)")
     args = parser.parse_args()
 
     eth = fetch_binance("ETHUSDT", args.interval, args.candles)
     btc = fetch_binance("BTCUSDT", args.interval, args.candles)
     feature_cols = RELATIVE_FEATURE_COLUMNS if args.features == "relative" else FEATURE_COLUMNS
+    context = None
+    if args.context:
+        from ml.pretrain_evolution import _context_sources
+
+        context = _context_sources("ETHUSDT", args.interval, pd.Timestamp(eth[0]["timestamp"]), args.candles)
     result = run(
         eth, btc, args.interval, args.horizon, args.windows, args.min_train,
         predictor_factory=lambda: PricePredictor(model_variant=args.variant, feature_cols=feature_cols),
+        context=context,
     )
     summary = result.summarize()
     for key, value in summary.items():
