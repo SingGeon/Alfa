@@ -18,6 +18,7 @@ from data_collector.defillama_client import get_ethereum_tvl_by_date
 from data_collector.http_utils import ExternalAPIError
 from database import repository
 from evaluation.recorder import record_prediction
+from ml import market_context
 from ml.combined_predictor import compute_confidence, generate_narrative_summary
 from ml.features import build_feature_frame
 from ml.price_predictor import _INTERVAL_TIMEDELTA, PricePredictor
@@ -167,8 +168,22 @@ def _get_trained_model(
         tvl_by_date = get_ethereum_tvl_by_date() if coin_id == "ethereum" else {}
         df = build_feature_frame(candles, sentiment_map, btc_close=btc_close, tvl_by_date=tvl_by_date)
         train_df = df.dropna()
+        # Market context (ml/market_context.py) for both variants: the
+        # evolving population's extra genes and news-swayed moods, and
+        # extra features for legacy (ml.price_predictor.
+        # LEGACY_CONTEXT_COLUMNS). Added after dropna(): a day without
+        # news or a source that's down must not drop candles. Always on
+        # (the tuned population has one shared, persisted life per
+        # coin/interval), independent of the use_sentiment toggle.
+        context = dict(
+            market_context.live_sources(config.BINANCE_SYMBOL, interval) if coin_id == config.COIN_ID else {},
+            sentiment_by_date=_sentiment_by_date(lookback_days=400),
+            tvl_by_date=tvl_by_date,
+        )
+        df = market_context.add_context(df, **context)
+        train_df = market_context.add_context(train_df, **context)
 
-        predictor = PricePredictor(backend=backend, model_variant=model_variant)
+        predictor = PricePredictor(backend=backend, model_variant=model_variant, evolution_key=f"{coin_id}_{interval}")
         predictor.fit(train_df)
         sentiment_avg = sum(sentiment_map.values()) / len(sentiment_map) if sentiment_map else 0.0
         now = time.monotonic()
@@ -247,7 +262,7 @@ def run_prediction(
     predictor, df, sentiment_avg, trained_at = _get_trained_model(
         coin_id, interval, use_sentiment, backend, model_variant
     )
-    predictions = predictor.predict(df, steps=steps, interval=interval)
+    predictions, diagnostics = predictor.predict_with_diagnostics(df, steps=steps, interval=interval)
     confidence = compute_confidence(predictions, sentiment_avg)
 
     # Real, model-derived answer to "how much does sentiment actually
@@ -283,10 +298,18 @@ def run_prediction(
             for p in predictions
         ],
     }
+    if diagnostics and diagnostics.get("method") == "evolution":
+        # The living population behind this forecast, for the dashboard.
+        result["evolution"] = {k: v for k, v in diagnostics.items() if k not in ("origin_close",)}
     repository.save_prediction(coin_id, result)
     # Evaluation log (evaluation/): records what the model said so it can be
-    # scored against the real price later. Never raises.
-    record_prediction(result, df, sentiment_avg)
+    # scored against the real price later, plus the evolving population's
+    # diagnostics (who voted, their genes, energy and emotions) so a
+    # forecast can be explained afterwards. Never raises.
+    # The population's timeline ("history") is only for the live response,
+    # not repeated in every stored row.
+    stored = {k: v for k, v in diagnostics.items() if k != "history"} if diagnostics else None
+    record_prediction(result, df, sentiment_avg, stored)
     return result
 
 

@@ -46,7 +46,7 @@ def _history(df) -> list[dict]:
     ]
 
 
-def record_prediction(result: dict, df, sentiment_avg: float) -> int | None:
+def record_prediction(result: dict, df, sentiment_avg: float, diagnostics: dict | None = None) -> int | None:
     """Log the prediction and, if it's a new one, draw its visual snapshot."""
     try:
         try:
@@ -67,6 +67,7 @@ def record_prediction(result: dict, df, sentiment_avg: float) -> int | None:
             confidence=result.get("confidence"),
             signal=signal,
             history=history,
+            diagnostics=diagnostics,
         )
         if prediction_id:
             from evaluation import charts  # matplotlib only loads once there's something to draw

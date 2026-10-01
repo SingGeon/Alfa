@@ -30,7 +30,7 @@ from api.services import (
 )
 from data_collector.market_data import SUPPORTED_INTERVALS, MarketDataError, get_current_price
 from database import repository
-from ml import pattern_recognition
+from ml import box_breakout, evolution_report, pattern_recognition
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +428,98 @@ def patterns():
         return jsonify({"error": f"Only {len(candles)} {interval} candles stored for {coin_id}; need >= 20"}), 409
 
     return jsonify({"coin_id": coin_id, "interval": interval, **pattern_recognition.analyze(candles, _get_lang())})
+
+
+# (coin_id, interval) -> (last candle timestamp, result): the adaptive run
+# only changes when a new candle arrives.
+_box_cache: dict[tuple[str, str], tuple] = {}
+
+
+@api_bp.get("/box-breakout")
+def box_breakout_strategy():
+    """Dynamic Box Breakout Strategy, adaptive (see ml/box_breakout.py's
+    run_adaptive): the algorithm picks its own settings from past data,
+    re-checked every 100 candles. No settings are taken from the request.
+    """
+    coin_id = request.args.get("coin_id", config.COIN_ID)
+    interval = request.args.get("interval", "1h")
+    if interval not in SUPPORTED_INTERVALS:
+        return jsonify({"error": f"interval must be one of {sorted(SUPPORTED_INTERVALS)}"}), 400
+
+    candles = repository.get_candles(coin_id, interval, limit=3000)
+    key = (coin_id, interval)
+    stamp = candles[-1]["timestamp"] if candles else None
+    cached = _box_cache.get(key)
+    if cached and cached[0] == stamp:
+        return jsonify(cached[1])
+    try:
+        result = {"coin_id": coin_id, "interval": interval, **box_breakout.run_adaptive(candles, interval)}
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
+    _box_cache[key] = (stamp, result)
+    return jsonify(result)
+
+
+def _population(interval: str):
+    """The living "tuned" population for the dashboard coin + interval, or an
+    error response."""
+    coin_id = request.args.get("coin_id", config.COIN_ID)
+    if interval not in SUPPORTED_INTERVALS:
+        return None, (jsonify({"error": f"interval must be one of {sorted(SUPPORTED_INTERVALS)}"}), 400)
+    ev = evolution_report.current(f"{coin_id}_{interval}")
+    if ev is None:
+        return None, (jsonify({"error": f"No population for {coin_id} {interval} yet: open the dashboard on the "
+                               f"new model, or run `python -m ml.pretrain_evolution --interval {interval}`."}), 404)
+    return ev, None
+
+
+_population_report_cache: dict[tuple, dict] = {}
+
+
+@api_bp.get("/evolution/report")
+def evolution_population_report():
+    """Everything about the evolving "tuned" population (ml/evolution_report.py)."""
+    interval = request.args.get("interval", "1h")
+    ev, err = _population(interval)
+    if err:
+        return err
+    key = (request.args.get("coin_id", config.COIN_ID), interval, ev.index[ev.t_last], ev.deaths)
+    if key not in _population_report_cache:
+        _population_report_cache.clear()
+        _population_report_cache[key] = {"interval": interval, **evolution_report.report(ev)}
+    return jsonify(_population_report_cache[key])
+
+
+@api_bp.get("/evolution/deaths")
+def evolution_population_deaths():
+    interval = request.args.get("interval", "1h")
+    ev, err = _population(interval)
+    if err:
+        return err
+    try:
+        page = int(request.args.get("page", 1))
+        page_size = int(request.args.get("page_size", 50))
+        generation = int(request.args["generation"]) if request.args.get("generation") else None
+        organism_id = int(request.args["organism"]) if request.args.get("organism") else None
+    except ValueError:
+        return jsonify({"error": "page, page_size, generation and organism must be integers"}), 400
+    cause = request.args.get("cause") or None
+    if cause and cause not in evolution_report.CAUSES:
+        return jsonify({"error": f"cause must be one of {list(evolution_report.CAUSES)}"}), 400
+    order = "asc" if request.args.get("order") == "asc" else "desc"
+    return jsonify(evolution_report.deaths_page(ev, page, page_size, cause, generation, organism_id, order))
+
+
+@api_bp.get("/evolution/organism/<int:organism_id>")
+def evolution_population_organism(organism_id: int):
+    interval = request.args.get("interval", "1h")
+    ev, err = _population(interval)
+    if err:
+        return err
+    found = evolution_report.organism(ev, organism_id)
+    if found is None:
+        return jsonify({"error": f"No organism #{organism_id} in this population"}), 404
+    return jsonify(found)
 
 
 @api_bp.get("/summary")

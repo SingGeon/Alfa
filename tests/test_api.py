@@ -58,11 +58,19 @@ def test_predict_success(client, seeded):
     body = resp.json
     assert len(body["predictions"]) == 3
     assert 0 <= body["confidence"] <= 100
+    # The evolving "tuned" population doesn't read news sentiment: no
+    # importance to report, rather than a made-up one.
+    assert body["sentiment_contribution_pct"] is None
+    assert body["trained_ago_seconds"] >= 0
+
+
+def test_predict_legacy_reports_sentiment_contribution(client, seeded):
+    resp = client.get("/api/predict?interval=1h&steps=3&model_variant=legacy")
+    assert resp.status_code == 200
     # sklearn's own learned feature importance for "sentiment" - real
     # signal from the trained model, not a fixed/made-up number - should
     # be a genuine share of 1.0 across all features.
-    assert 0 <= body["sentiment_contribution_pct"] <= 100
-    assert body["trained_ago_seconds"] >= 0
+    assert 0 <= resp.json["sentiment_contribution_pct"] <= 100
 
 
 def test_predict_sentiment_contribution_none_without_sentiment(client, seeded):
@@ -117,10 +125,14 @@ def test_summary_agrees_with_daily_outlook_direction(client, seeded, synthetic_c
     assert summary_resp.status_code == 200
     narrative = summary_resp.json["narrative"]
 
-    expected_word = "rise" if daily_change_pct >= 0 else "fall"
-    unexpected_word = "fall" if daily_change_pct >= 0 else "rise"
-    assert expected_word in narrative
-    assert unexpected_word not in narrative
+    if daily_change_pct == 0:
+        assert "stay about where it is" in narrative
+        assert "rise" not in narrative and "fall" not in narrative
+    else:
+        expected_word = "rise" if daily_change_pct > 0 else "fall"
+        unexpected_word = "fall" if daily_change_pct > 0 else "rise"
+        assert expected_word in narrative
+        assert unexpected_word not in narrative
 
 
 def test_predict_accuracy(client, synthetic_candles):
@@ -240,3 +252,37 @@ def test_gas_not_configured(client, monkeypatch):
     monkeypatch.setattr(config, "ETHERSCAN_API_KEY", "")
     resp = client.get("/api/gas")
     assert resp.status_code == 501
+
+
+def test_box_breakout_endpoint(client, seeded):
+    resp = client.get("/api/box-breakout?interval=1h&lookback=10")
+    assert resp.status_code == 200
+    body = resp.json
+    assert body["mode"] == "adaptive"
+    assert {"boxes", "trades", "stats", "box_stats", "segments", "current", "active_box", "open_trade"} <= set(body)
+    assert body["stats"]["bars"] > 0
+    assert len(body["segments"]) >= 1
+
+
+def test_box_breakout_endpoint_errors(client, seeded):
+    assert client.get("/api/box-breakout?interval=3m").status_code == 400
+    assert client.get("/api/box-breakout?interval=1d").status_code == 409  # no 1d candles seeded
+
+
+def test_population_endpoints(client, synthetic_candles):
+    repository.save_candles("ethereum", "1h", synthetic_candles(700))
+    assert client.get("/api/evolution/report?interval=1h").status_code == 404  # not born yet
+    assert client.get("/api/predict?interval=1h&steps=3&model_variant=tuned").status_code == 200
+    report = client.get("/api/evolution/report?interval=1h")
+    assert report.status_code == 200
+    body = report.json
+    assert {"summary", "causes", "timeline", "generations", "alive", "track_record"} <= set(body)
+    assert body["summary"]["deaths"] == sum(c["deaths"] for c in body["causes"])
+    deaths = client.get("/api/evolution/deaths?interval=1h&page_size=5").json
+    assert deaths["total"] == body["summary"]["deaths"]
+    if deaths["rows"]:
+        oid = deaths["rows"][0]["id"]
+        org = client.get(f"/api/evolution/organism/{oid}?interval=1h").json
+        assert org["organism"]["id"] == oid and org["organism"]["dead"] is True
+    assert client.get("/api/evolution/deaths?interval=1h&cause=nope").status_code == 400
+    assert client.get("/api/evolution/organism/999999?interval=1h").status_code == 404

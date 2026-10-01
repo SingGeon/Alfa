@@ -122,3 +122,26 @@ def evaluation_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "EVAL_DAILY_DIR", str(data_dir / "daily"))
     monkeypatch.setattr(config, "EVAL_SNAPSHOTS_DIR", str(data_dir / "snapshots"))
     yield data_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolated_evolution_state(tmp_path, monkeypatch):
+    """The "tuned" population persists to data/evolution/ (ml/evolution.py);
+    tests must neither read the real saved populations nor write into them."""
+    from ml import evolution
+
+    monkeypatch.setattr(evolution, "STATE_DIR", tmp_path / "evolution")
+    evolution._registry.clear()
+    evolution._saved_mtime.clear()
+    yield
+    evolution._registry.clear()
+    evolution._saved_mtime.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_market_context(monkeypatch):
+    """ml/market_context.live_sources fetches Fear & Greed and Binance
+    futures over the network - offline tests get no live sources."""
+    from ml import market_context
+
+    monkeypatch.setattr(market_context, "live_sources", lambda symbol, interval: {})

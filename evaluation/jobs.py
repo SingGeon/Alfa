@@ -68,6 +68,9 @@ def startup_recovery() -> None:
             moved = charts.organize_existing(root)
             if moved:
                 logger.info("Moved %d evaluation PNGs in %s into the model/interval/day layout", moved, root)
+        rescored = evaluator.rescore_unscored()
+        if rescored:
+            logger.info("Scored %d older predictions step by step", rescored)
         result = evaluator.complete_pending_predictions()
         charts.refresh_snapshots(result["updated_ids"])
         drawn = charts.generate_missing_charts()

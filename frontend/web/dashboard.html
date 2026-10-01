@@ -31,6 +31,7 @@
       <a class="nav-link" href="/evaluation.html">🎯 <span data-i18n="nav.evaluation">Evaluation</span></a>
       <a class="nav-link" href="/history.html">🗓️ <span data-i18n="nav.history">Day history</span></a>
       <a class="nav-link" href="/visual.html">🖼️ <span data-i18n="nav.visual">Visual history</span></a>
+      <a class="nav-link" href="/population.html">🧬 <span data-i18n="nav.population">Model population</span></a>
       <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
         <button data-lang="en" type="button">EN</button>
         <button data-lang="ro" type="button">RO</button>
@@ -71,7 +72,7 @@
           <span data-i18n="dashboard.chart.sentimentToggle">Sentiment in model</span>
         </label>
 
-        <div class="model-variant-group" id="modelVariantGroup" role="group" aria-label="Model version" data-i18n-aria-label="dashboard.chart.modelVariantAria" title="tuned = lightly regularized GradientBoostingRegressor (better average error, calmer forecast); legacy = sklearn's own defaults (the original model, more responsive-looking, more prone to overfitting noise)" data-i18n-title="dashboard.chart.modelVariantTitle">
+        <div class="model-variant-group" id="modelVariantGroup" role="group" aria-label="Model version" data-i18n-aria-label="dashboard.chart.modelVariantAria" title="new = an evolving population of small models with emotions; old = the original recursive model, kept unchanged as the control" data-i18n-title="dashboard.chart.modelVariantTitle">
           <button data-model-variant="legacy" class="active" type="button" data-i18n="dashboard.chart.modelVariant.legacy">Old model</button>
           <button data-model-variant="tuned" type="button" data-i18n="dashboard.chart.modelVariant.tuned">New model</button>
         </div>
@@ -90,6 +91,7 @@
           <label class="indicator-toggle"><input type="checkbox" data-indicator="fibonacci"><span>Fibonacci</span></label>
           <label class="indicator-toggle"><input type="checkbox" data-indicator="vwap"><span>VWAP</span></label>
           <label class="indicator-toggle"><input type="checkbox" data-indicator="patterns"><span data-i18n="dashboard.chart.patternsLabel">🔍 AI Patterns</span></label>
+          <label class="indicator-toggle"><input type="checkbox" data-indicator="box"><span data-i18n="dashboard.chart.boxLabel">📦 Box Breakout</span></label>
         </div>
 
         <button id="explainBtn" class="btn-explain" type="button" data-i18n="dashboard.chart.explainBtn">💡 Explain indicators</button>
@@ -105,6 +107,30 @@
 
       <div id="patternAlert" class="pattern-alert" hidden></div>
 
+      <div id="boxPanel" class="box-panel" hidden>
+        <div class="box-panel-head">
+          <span class="box-panel-title" data-i18n="dashboard.box.title">Dynamic Box Breakout Strategy</span>
+          <span class="box-panel-sub" data-i18n="dashboard.box.subtitle">Self-tuning, walk-forward tested, 0.1% fee per side</span>
+        </div>
+        <details class="box-explain" open>
+          <summary data-i18n="dashboard.box.howTitle">How it works</summary>
+          <ol>
+            <li data-i18n="dashboard.box.how1">Box: when the highest high and lowest low of the last X candles hold for Y more candles, the price is consolidating. That range is the box (ceiling and floor), drawn until a candle closes outside it.</li>
+            <li data-i18n="dashboard.box.how2">Entry: a close above the ceiling opens a long, below the floor a short, only if that candle's volume is above its 14-candle average (filters fake breakouts). A breakout the other way reverses the trade.</li>
+            <li data-i18n="dashboard.box.how3">Risk: the stop sits on the other side of the box. Exit either at a fixed target (a multiple of the risk) or by moving the stop to the edge of each new box that forms.</li>
+            <li data-i18n="dashboard.box.how4">Self-tuning: every 100 candles the algorithm re-tests 48 setting combinations (box length, hold, exit) on the previous 500 candles only, and keeps the one that would have made the most after fees. If none made money, it stays out of the market until the next check.</li>
+            <li data-i18n="dashboard.box.how5">Honest numbers: every statistic below comes only from candles the algorithm had not seen when it chose its settings.</li>
+          </ol>
+        </details>
+        <div id="boxChoice" class="box-choice"></div>
+        <div id="boxStatus" class="box-status"></div>
+        <div class="box-stats-heading" data-i18n="dashboard.box.tradeStatsHeading">Strategy results (out of sample)</div>
+        <div id="boxStats" class="box-stats"></div>
+        <div class="box-stats-heading" data-i18n="dashboard.box.boxStatsHeading">How the boxes behaved</div>
+        <div id="boxBoxStats" class="box-stats"></div>
+        <p class="box-disclaimer" data-i18n="dashboard.box.disclaimer">Entry at the breakout candle's close, stop checked before target when a candle touches both. Past results don't guarantee future ones.</p>
+      </div>
+
       <div class="chart-wrap">
         <div id="chart" class="chart"></div>
         <div id="chartEmpty" class="chart-empty" hidden data-i18n="dashboard.chart.empty">Not enough historical data yet.</div>
@@ -117,6 +143,7 @@
         <span class="legend-item"><i class="dot down"></i><span data-i18n="common.legend.down">Down</span></span>
         <span class="legend-item"><i class="dot pred"></i><span data-i18n="common.legend.pred">Prediction</span></span>
         <span class="legend-item"><i class="dot band"></i><span data-i18n="common.legend.band">Confidence interval</span></span>
+        <span class="legend-item" id="boxLegendItem" hidden><i class="dot box"></i><span data-i18n="dashboard.legend.box">Box: green/red = broke up/down, grey = no volume, blue = active</span></span>
         <span class="legend-item" id="patternLegendItem" hidden><i class="dot pattern"></i><span data-i18n="dashboard.legend.pattern">Geometric pattern detected</span></span>
       </div>
     </section>
@@ -205,6 +232,55 @@
       <div class="card-header" data-i18n="dashboard.news.header">Latest news + sentiment</div>
       <div class="news-list" id="newsList">
         <p class="empty-hint"><span data-i18n="dashboard.news.empty">No articles collected yet. Run</span> <code>python run_scheduler.py</code>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card evolution-card" id="evolutionCard" hidden>
+    <div class="evolution-head">
+      <span class="card-header" data-i18n="dashboard.evo.header">Model population</span>
+      <span id="evoMood" class="evo-mood"></span>
+    </div>
+    <a class="nav-link evo-more" href="/population.html" data-i18n="dashboard.evo.fullHistory">See its whole history: every death, why, and what evolved →</a>
+    <div id="evoSentiment" class="evo-sentiment"></div>
+    <p class="evo-intro" data-i18n="dashboard.evo.intro">The new model is a population of 24 small models. Each one lives only while its predictions beat "the price stays the same" on real candles: wins give it energy (more for being right further ahead, plus a combo bonus for being right on every horizon at once), mistakes take it away (the further off, the much more) and so does time, and at 0 it dies. The dead are replaced by children of the strongest. Each one has a mood (its recent win rate, swayed by the news as much as its news-sensitivity gene says): a frightened model barely moves its forecast, a confident one commits. The forecast on the chart is the vote of the 8 strongest adults, weighted by energy.</p>
+    <div id="evoStats" class="box-stats"></div>
+    <div class="box-stats-heading" data-i18n="dashboard.evo.trackHeading">Real track record (votes on candles it hadn't seen yet)</div>
+    <p id="evoTrackNote" class="evo-intro"></p>
+    <div class="evo-table-wrap">
+      <table class="evo-table">
+        <thead><tr>
+          <th data-i18n="dashboard.evo.colHorizon">Ahead</th>
+          <th data-i18n="dashboard.evo.colVotes">Votes</th>
+          <th data-i18n="dashboard.evo.colSkill">vs "no change"</th>
+          <th data-i18n="dashboard.evo.colDirection">Direction right</th>
+          <th data-i18n="dashboard.evo.colRecentSkill">Last 500: vs "no change"</th>
+          <th data-i18n="dashboard.evo.colRecentDirection">Last 500: direction</th>
+        </tr></thead>
+        <tbody id="evoTrack"></tbody>
+      </table>
+    </div>
+    <div class="evo-grid">
+      <div>
+        <div class="box-stats-heading" data-i18n="dashboard.evo.leaders">Who is voting now</div>
+        <div class="evo-table-wrap">
+          <table class="evo-table">
+            <thead><tr>
+              <th>#</th><th data-i18n="dashboard.evo.colEmotion">Mood</th><th data-i18n="dashboard.evo.colEnergy">Energy</th>
+              <th data-i18n="dashboard.evo.colAge">Age</th><th data-i18n="dashboard.evo.colGen">Gen.</th><th data-i18n="dashboard.evo.colCombos">Combos</th>
+              <th data-i18n="dashboard.evo.colNews">News effect</th><th data-i18n="dashboard.evo.colInputs">Looks at</th>
+            </tr></thead>
+            <tbody id="evoLeaders"></tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <div class="box-stats-heading" data-i18n="dashboard.evo.usage">What the voters look at</div>
+        <div id="evoUsage" class="evo-usage"></div>
+        <div class="box-stats-heading" data-i18n="dashboard.evo.survival">Average lifespan by gene (models that died)</div>
+        <div id="evoSurvival" class="evo-usage"></div>
+        <div class="box-stats-heading" data-i18n="dashboard.evo.moodHistory">Population mood over time</div>
+        <svg id="evoMoodChart" class="evo-mood-chart" viewBox="0 0 300 60" preserveAspectRatio="none" role="img"></svg>
       </div>
     </div>
   </section>

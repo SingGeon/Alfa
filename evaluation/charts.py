@@ -53,8 +53,16 @@ PREDICTED = "#498aa8"
 ACTUAL = "#5fb894"
 ERROR = "#d8706a"
 
+BASELINE = "#a3a3a3"
+
 FIG_SIZE = (10, 6)
 DPI = 100
+
+
+def model_label(model_name: str) -> str:
+    """The legacy model is the unchanged reference the tuned one is measured
+    against - say so wherever it's shown."""
+    return f"{model_name} (control)" if model_name.endswith("-legacy") else model_name
 
 
 BY_DATE_DIR = "by-date"
@@ -174,6 +182,11 @@ def draw_prediction(pred: dict) -> Figure:
         pred_x, [anchor_price] + [p["price"] for p in predicted], linestyle="--", linewidth=2, color=PREDICTED,
         marker="o", markersize=3, zorder=4, label="Predicție AI",
     )
+    # Baseline every forecast is scored against: the price simply stays put.
+    ax.plot(
+        [anchor_time, end_time], [anchor_price, anchor_price], linestyle=(0, (2, 3)), linewidth=1.3,
+        color=BASELINE, zorder=3.5, label="Fără schimbare",
+    )
 
     # The real candles go on top of the forecast.
     if actual:
@@ -193,26 +206,42 @@ def draw_prediction(pred: dict) -> Figure:
         textcoords="offset points", color=TEXT, fontsize=9, alpha=0.8,
     )
 
-    ax.set_title(
-        f"{pred['model_name']} · {pred['interval']} · {pred['horizon_steps']} pași",
-        color=TEXT, fontsize=14, fontweight="bold", loc="left",
+    # Title row, then legend (left) + status box (right) above the plot:
+    # nothing overlays the candles or the end of the forecast.
+    fig.subplots_adjust(top=0.78)
+    fig.text(
+        0.125, 0.965, f"{model_label(pred['model_name'])} · {pred['interval']} · {pred['horizon_steps']} pași",
+        color=TEXT, fontsize=14, fontweight="bold", va="top",
     )
     fig.text(
         0.125, 0.005, f"Creată {created.strftime('%Y-%m-%d %H:%M')} UTC · preț la predicție ${anchor_price:,.2f}",
         color=TEXT, alpha=0.7, fontsize=9, va="bottom",
     )
 
+    from evaluation.evaluator import score_path  # evaluator doesn't import charts: no cycle
+
     if pred.get("status") == "completed":
         direction = "corectă" if pred["direction_correct"] else "greșită"
-        box_text, box_color = f"Eroare {pred['pct_error']:+.2f}%\nDirecție {direction}", ERROR
+        box_text, box_color = f"Eroare {pred['pct_error']:+.2f}% · direcție {direction}", ERROR
     elif pred.get("status") == "expired":
-        box_text, box_color = "Expirată\n(fără preț real)", GRID
+        box_text, box_color = "Expirată (fără preț real)", GRID
     else:
-        box_text, box_color = f"În desfășurare\n{len(actual)}/{len(predicted)} candele reale", TEXT
+        box_text, box_color = f"În desfășurare · {len(actual)}/{len(predicted)} candele reale", TEXT
+    score = score_path(pred, actual)
+    if score["steps_scored"]:
+        skill = score["skill_score"]
+        skill_text = "—" if skill is None else f"{skill:+.2f}"
+        cover = score["band_coverage"]
+        box_text += f"\nAbilitate vs fără schimbare {skill_text}"
+        if cover is not None:
+            box_text += f" · în bandă {cover * 100:.0f}%"
+        if skill is not None and pred.get("status") == "completed":
+            box_color = ACTUAL if skill > 0 else ERROR
+    # Above the plot, not inside it, so it never hides the end of the forecast.
     ax.text(
-        0.99, 0.97, box_text, transform=ax.transAxes, ha="right", va="top", color=box_color, fontsize=12,
-        fontweight="bold", zorder=10,
-        bbox={"facecolor": BACKGROUND, "edgecolor": box_color, "boxstyle": "round,pad=0.4", "alpha": 0.9},
+        1.0, 1.015, box_text, transform=ax.transAxes, ha="right", va="bottom", color=box_color, fontsize=10.5,
+        fontweight="bold", zorder=10, linespacing=1.4,
+        bbox={"facecolor": BACKGROUND, "edgecolor": box_color, "boxstyle": "round,pad=0.35", "alpha": 0.9},
     )
 
     first = parse_iso(history[0]["timestamp"]) if history else anchor_time
@@ -223,7 +252,9 @@ def draw_prediction(pred: dict) -> Figure:
         spine.set_color(GRID)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M", tz=created.tzinfo))
     ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
-    legend = ax.legend(loc="upper left", facecolor=BACKGROUND, edgecolor=GRID, fontsize=9)
+    legend = ax.legend(
+        loc="lower left", bbox_to_anchor=(0.0, 1.015), ncol=2, facecolor=BACKGROUND, edgecolor=GRID, fontsize=9,
+    )
     legend.set_zorder(10)
     for text in legend.get_texts():
         text.set_color(TEXT)

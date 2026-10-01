@@ -8,6 +8,8 @@
     GET /stats                  accuracy stats: overall, per model / interval / day and their combinations
                                 (same filters as /predictions)
     GET /prediction-days        days (UTC) predictions were made on, newest first, with counts
+    GET /stats/steps            per forecast step: model vs "no change" error, skill, band coverage
+    GET /predictions/<id>/diagnostics   the evolving population's log for one tuned prediction
     GET /days                   dates that have a daily overview (newest first)
     GET /days/<YYYY-MM-DD>      that day's stats + which files exist
     GET /days/<YYYY-MM-DD>/overview.png | .gif | .pdf
@@ -87,6 +89,7 @@ def _sort() -> tuple[str, str]:
 def _public(row: dict) -> dict:
     row = dict(row)
     row.pop("history_path", None)  # only needed to draw the image; bulky
+    row.pop("diagnostics", None)   # served on its own: /predictions/<id>/diagnostics
     row["has_chart"] = row["status"] == "completed"
     row["snapshot_url"] = f"/api/evaluation/predictions/{row['id']}/snapshot.png"
     return row
@@ -138,6 +141,19 @@ def get_stats():
     # to by_day's day it resolved (the chart folders' grouping).
     body["by_created_day"] = storage.grouped_stats(("created_day",), filters)
     return jsonify(body)
+
+
+@evaluation_bp.get("/stats/steps")
+def get_step_stats():
+    return jsonify({"steps": stats.step_stats(_filters())})
+
+
+@evaluation_bp.get("/predictions/<int:prediction_id>/diagnostics")
+def get_diagnostics(prediction_id: int):
+    pred = storage.get_prediction(prediction_id)
+    if not pred:
+        abort(404)
+    return jsonify({"id": prediction_id, "model_name": pred["model_name"], "diagnostics": pred["diagnostics"]})
 
 
 @evaluation_bp.get("/prediction-days")

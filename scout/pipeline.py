@@ -264,7 +264,9 @@ def _train_and_predict(candles: list[dict], articles: list[dict], btc_close=None
     if len(train_df) < 30:
         return None
 
-    predictor = PricePredictor(backend=config.PREDICTION_BACKEND, ensemble_size=ensemble_size)
+    # Scout uses the original ("legacy") model on purpose: the evolving
+    # "tuned" population is for the main dashboard's coins.
+    predictor = PricePredictor(backend=config.PREDICTION_BACKEND, ensemble_size=ensemble_size, model_variant="legacy")
     try:
         predictor.fit(train_df)
         predictions = predictor.predict(df, steps=PREDICTION_STEPS, interval=PREDICTION_INTERVAL)

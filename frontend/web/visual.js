@@ -39,6 +39,11 @@ function localDayKey(iso) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// The legacy model is the unchanged reference the tuned one is measured against.
+const modelLabel = (m) => (m.endsWith("-legacy") ? `${m} (${t("visual.control")})` : m);
+const fmtSkill = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}`);
+const skillCls = (v) => (v == null ? "" : v > 0 ? "eval-ok" : "eval-err");
+
 const fmtPct = (v, signed = false) => (v == null ? "—" : `${signed && v > 0 ? "+" : ""}${v.toFixed(2)}%`);
 
 async function getJson(url) {
@@ -89,12 +94,14 @@ function statTiles(s) {
     <div><span>${escapeHtml(t("eval.summary.meanError"))}</span><strong>${fmtPct(s.mean_abs_pct_error)}</strong>${done ? "" : `<small>${escapeHtml(t("visual.stats.noneYet"))}</small>`}</div>
     <div><span>${escapeHtml(t("visual.stats.usd"))}</span><strong>${s.mean_abs_error_usd == null ? "—" : `$${s.mean_abs_error_usd.toFixed(2)}`}</strong></div>
     <div><span>${escapeHtml(t("eval.summary.direction"))}</span><strong class="${dirCls}">${s.direction_accuracy_pct == null ? "—" : `${s.direction_accuracy_pct.toFixed(1)}%`}</strong></div>
-    <div><span>${escapeHtml(t("visual.stats.bias"))}</span><strong>${fmtPct(s.mean_pct_error, true)}</strong><small>${escapeHtml(t("visual.stats.biasHint"))}</small></div>`;
+    <div><span>${escapeHtml(t("visual.stats.bias"))}</span><strong>${fmtPct(s.mean_pct_error, true)}</strong><small>${escapeHtml(t("visual.stats.biasHint"))}</small></div>
+    <div><span>${escapeHtml(t("visual.stats.skill"))}</span><strong class="${skillCls(s.skill_score)}">${fmtSkill(s.skill_score)}</strong><small>${escapeHtml(t("visual.stats.skillHint"))}</small></div>
+    <div><span>${escapeHtml(t("visual.stats.coverage"))}</span><strong>${s.band_coverage_pct == null ? "—" : `${s.band_coverage_pct.toFixed(0)}%`}</strong><small>${escapeHtml(t("visual.stats.coverageHint"))}</small></div>`;
 }
 
 function breakdownTable(firstCol, rows) {
   if (!rows.length) return "";
-  const head = [firstCol, t("visual.col.predictions"), t("visual.col.completed"), t("visual.col.error"), t("visual.col.direction")];
+  const head = [firstCol, t("visual.col.predictions"), t("visual.col.completed"), t("visual.col.error"), t("visual.col.direction"), t("visual.col.skill"), t("visual.col.coverage")];
   return `
     <table>
       <thead><tr>${head.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
@@ -103,6 +110,8 @@ function breakdownTable(firstCol, rows) {
           <td>${escapeHtml(r.label)}</td><td>${r.s.predictions}</td><td>${r.s.completed}</td>
           <td>${fmtPct(r.s.mean_abs_pct_error)}</td>
           <td>${r.s.direction_accuracy_pct == null ? "—" : `${r.s.direction_accuracy_pct.toFixed(1)}%`}</td>
+          <td class="${skillCls(r.s.skill_score)}">${fmtSkill(r.s.skill_score)}</td>
+          <td>${r.s.band_coverage_pct == null ? "—" : `${r.s.band_coverage_pct.toFixed(0)}%`}</td>
         </tr>`).join("")}</tbody>
     </table>
     <p class="eval-hint">${escapeHtml(t("visual.jumpHint"))}</p>`;
@@ -133,7 +142,7 @@ async function renderNav() {
 
   if (state.view === "model") {
     const count = Object.fromEntries(general.by_model.map((r) => [r.model, r.predictions]));
-    tabs($("modelTabs"), models.map((m) => ({ value: m, label: m, count: count[m] || 0 })), state.model, (v) => go({ model: v, interval: "" }));
+    tabs($("modelTabs"), models.map((m) => ({ value: m, label: modelLabel(m), count: count[m] || 0 })), state.model, (v) => go({ model: v, interval: "" }));
     const perInterval = Object.fromEntries(general.by_model_interval.filter((r) => r.model === state.model).map((r) => [r.interval, r.predictions]));
     const total = Object.values(perInterval).reduce((a, b) => a + b, 0);
     tabs(
@@ -164,7 +173,7 @@ function card(r) {
       <img loading="lazy" src="${escapeHtml(r.snapshot_url)}?t=${state.stamp}" alt="${escapeHtml(`${r.model_name} ${r.interval} ${r.created_at}`)}">
       <figcaption>
         <span class="visual-when">${fmtTime(r.created_at)}</span>
-        <span class="visual-meta">${escapeHtml(r.model_name)} · ${escapeHtml(r.interval)} · ${escapeHtml(tf("visual.filter.steps", { n: r.horizon_steps }))}</span>
+        <span class="visual-meta">${escapeHtml(modelLabel(r.model_name))} · ${escapeHtml(r.interval)} · ${escapeHtml(tf("visual.filter.steps", { n: r.horizon_steps }))}</span>
         ${status}
       </figcaption>
     </figure>`;
@@ -193,7 +202,7 @@ function groupBy(rows, keyFn, titleFn) {
 async function loadModelView() {
   const filters = { model: state.model, interval: state.interval };
   const sel = await getJson(`/api/evaluation/stats?${query(filters)}`);
-  $("selectionTitle").textContent = `${state.model} · ${state.interval || t("visual.allIntervals")}`;
+  $("selectionTitle").textContent = `${modelLabel(state.model)} · ${state.interval || t("visual.allIntervals")}`;
   $("selectionStats").innerHTML = statTiles(sel.overall);
   $("breakdown").innerHTML = state.interval
     ? breakdownTable(t("visual.col.day"), [...sel.by_created_day].reverse().map((r) => ({ label: fmtDay(r.created_day), s: r, jump: { view: "day", day: r.created_day } })))
@@ -201,6 +210,8 @@ async function loadModelView() {
       const r = sel.by_interval.find((x) => x.interval === i);
       return r ? [{ label: i, s: r, jump: { interval: i } }] : [];
     }));
+
+  await renderStepStats(filters);
 
   const data = await getJson(`/api/evaluation/predictions?${query({ ...filters, sort: "created_at", order: "desc", page: state.page, page_size: PAGE_SIZE })}`);
   state.pages = data.pages;
@@ -211,8 +222,33 @@ async function loadModelView() {
   $("nextPage").disabled = data.page >= data.pages;
 }
 
+async function renderStepStats(filters) {
+  // Per step only makes sense for one model + interval at one horizon.
+  if (!filters.interval || !state.horizon) {
+    $("stepStats").innerHTML = "";
+    return;
+  }
+  const { steps } = await getJson(`/api/evaluation/stats/steps?${query(filters)}`);
+  if (!steps.length) {
+    $("stepStats").innerHTML = "";
+    return;
+  }
+  const head = [t("visual.col.step"), t("visual.col.predictions"), t("visual.col.error"), t("visual.col.baseline"), t("visual.col.skill"), t("visual.col.coverage")];
+  $("stepStats").innerHTML = `
+    <div class="vis-selection-title" style="margin-top:14px">${escapeHtml(t("visual.steps.title"))}</div>
+    <table>
+      <thead><tr>${head.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead>
+      <tbody>${steps.map((s) => `
+        <tr><td>${s.step}</td><td>${s.scored}</td><td>${fmtPct(s.mae_model_pct)}</td><td>${fmtPct(s.mae_baseline_pct)}</td>
+          <td class="${skillCls(s.skill_score)}">${fmtSkill(s.skill_score)}</td>
+          <td>${s.band_coverage_pct == null ? "—" : `${s.band_coverage_pct.toFixed(0)}%`}</td></tr>`).join("")}</tbody>
+    </table>
+    <p class="eval-hint">${escapeHtml(t("visual.steps.hint"))}</p>`;
+}
+
 async function loadDayView() {
   $("pager").hidden = true;
+  $("stepStats").innerHTML = "";
   if (!state.day) {
     $("selectionTitle").textContent = "";
     $("selectionStats").innerHTML = statTiles(null);
@@ -227,13 +263,13 @@ async function loadDayView() {
   const cells = [...sel.by_model_interval].sort((a, b) =>
     a.model.localeCompare(b.model) || INTERVALS.indexOf(a.interval) - INTERVALS.indexOf(b.interval));
   $("breakdown").innerHTML = breakdownTable(t("visual.col.modelInterval"), cells.map((r) => ({
-    label: `${r.model} · ${r.interval}`, s: r, jump: { view: "model", model: r.model, interval: r.interval },
+    label: `${modelLabel(r.model)} · ${r.interval}`, s: r, jump: { view: "model", model: r.model, interval: r.interval },
   })));
 
   const data = await getJson(`/api/evaluation/predictions?${query({ ...filters, sort: "created_at", order: "desc", page: 1, page_size: DAY_PAGE_SIZE })}`);
   const rows = [...data.rows].sort((a, b) =>
     a.model_name.localeCompare(b.model_name) || INTERVALS.indexOf(a.interval) - INTERVALS.indexOf(b.interval) || b.created_at.localeCompare(a.created_at));
-  renderGroups(groupBy(rows, (r) => `${r.model_name}|${r.interval}`, (r) => `${r.model_name} · ${r.interval}`));
+  renderGroups(groupBy(rows, (r) => `${r.model_name}|${r.interval}`, (r) => `${modelLabel(r.model_name)} · ${r.interval}`));
 }
 
 async function load() {

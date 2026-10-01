@@ -53,6 +53,41 @@ def compute_stats(filters: dict | None = None) -> dict:
     }
 
 
+def step_stats(filters: dict | None = None) -> list[dict]:
+    """Per forecast step k (1 = first candle ahead): how many predictions
+    have a real price for it so far, the model's and the "no change"
+    baseline's mean error in %, skill (1 - model / baseline), and how often
+    the real price was inside the band. Pending predictions count for the
+    steps whose candle has already closed."""
+    acc: dict[int, dict] = defaultdict(lambda: {"n": 0, "model": 0.0, "base": 0.0, "inside": 0, "banded": 0})
+    for pred in storage.scored_paths(filters):
+        actual = {p["timestamp"]: p["price"] for p in pred["actual_path"]}
+        for k, p in enumerate(pred["predicted_path"], start=1):
+            real = actual.get(p["timestamp"])
+            if not real:
+                continue
+            a = acc[k]
+            a["n"] += 1
+            a["model"] += abs(p["price"] - real) / real * 100
+            a["base"] += abs(pred["price_at_prediction"] - real) / real * 100
+            if p.get("lower") is not None and p.get("upper") is not None:
+                a["banded"] += 1
+                a["inside"] += p["lower"] <= real <= p["upper"]
+    rows = []
+    for k in sorted(acc):
+        a = acc[k]
+        model, base = a["model"] / a["n"], a["base"] / a["n"]
+        rows.append({
+            "step": k,
+            "scored": a["n"],
+            "mae_model_pct": round(model, 3),
+            "mae_baseline_pct": round(base, 3),
+            "skill_score": round(1 - model / base, 3) if base else None,
+            "band_coverage_pct": round(a["inside"] / a["banded"] * 100, 1) if a["banded"] else None,
+        })
+    return rows
+
+
 def _write_if_changed(path: Path, text: str) -> bool:
     data = text.encode("utf-8")
     if path.exists() and path.read_bytes() == data:

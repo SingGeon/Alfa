@@ -60,7 +60,7 @@ function renderSummary(summary) {
   }
   grid.innerHTML = summary.map((m) => `
     <div class="eval-summary-card">
-      <div class="eval-summary-model">${escapeHtml(m.model_name)}</div>
+      <div class="eval-summary-model">${escapeHtml(m.model_name.endsWith("-legacy") ? `${m.model_name} (control)` : m.model_name)}</div>
       <div class="eval-summary-stats">
         <div><span>${escapeHtml(t("eval.summary.predictions"))}</span><strong>${m.predictions}</strong>
           <small>${m.completed} ${escapeHtml(t("eval.summary.completed"))} · ${m.pending} ${escapeHtml(t("eval.summary.pending"))}</small></div>
@@ -85,7 +85,7 @@ function renderRows(rows) {
       <tr class="eval-clickable" data-snapshot="${escapeHtml(r.snapshot_url)}">
         <td>${fmtTime(r.created_at)}</td>
         <td>${escapeHtml(r.interval)}</td>
-        <td>${escapeHtml(r.model_name)}</td>
+        <td>${escapeHtml(r.model_name.endsWith("-legacy") ? `${r.model_name} (control)` : r.model_name)}</td>
         <td class="num">${fmtMoney(r.price_at_prediction)}</td>
         <td class="num price">${fmtMoney(r.predicted_final_price)}</td>
         <td class="num">${fmtMoney(r.actual_final_price)}</td>

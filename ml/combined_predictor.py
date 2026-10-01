@@ -55,13 +55,18 @@ def _template_narrative(
     configured. Pure string formatting on numbers already computed by the
     caller - no re-running of any model, so a `lang` toggle is instant.
     """
+    pct = abs(predicted_price - last_known_price) / last_known_price * 100 if last_known_price else 0.0
+    # Same 2-decimal rounding as the outlook tile's change_pct: a move that
+    # shows there as 0.00% must not read "will fall by about 0.00%" here.
+    flat = round(pct, 2) == 0
     if lang == "ro":
         direction = "creasca" if predicted_price >= last_known_price else "scada"
-        pct = abs(predicted_price - last_known_price) / last_known_price * 100 if last_known_price else 0.0
         mood = "pozitiv" if sentiment_avg > 0.05 else ("negativ" if sentiment_avg < -0.05 else "neutru")
+        move = ("ramana aproximativ la acelasi nivel maine" if flat
+                else f"{direction} cu aproximativ {pct:.2f}% maine")
         lines = [
-            f"Modelul tehnic estimeaza ca pretul ETH va {direction} cu aproximativ {pct:.2f}% "
-            f"maine fata de pretul curent, pornind de la tendinta recenta a preturilor istorice.",
+            f"Modelul tehnic estimeaza ca pretul ETH va {move} "
+            f"fata de pretul curent, pornind de la tendinta recenta a preturilor istorice.",
             f"Sentimentul din stiri este in medie {mood} (scor {sentiment_avg:.2f}), pe baza celor "
             f"{len(headlines)} articole recente analizate.",
         ]
@@ -70,10 +75,10 @@ def _template_narrative(
         return " ".join(lines)
 
     direction = "rise" if predicted_price >= last_known_price else "fall"
-    pct = abs(predicted_price - last_known_price) / last_known_price * 100 if last_known_price else 0.0
     mood = "positive" if sentiment_avg > 0.05 else ("negative" if sentiment_avg < -0.05 else "neutral")
+    move = "stay about where it is" if flat else f"{direction} by about {pct:.2f}%"
     lines = [
-        f"The technical model estimates ETH's price will {direction} by about {pct:.2f}% "
+        f"The technical model estimates ETH's price will {move} "
         f"tomorrow relative to the current price, based on the recent trend in historical prices.",
         f"News sentiment is on average {mood} (score {sentiment_avg:.2f}), based on the "
         f"{len(headlines)} recent articles analyzed.",

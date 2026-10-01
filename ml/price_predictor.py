@@ -23,13 +23,22 @@ they're either present in the price series or they aren't.
 The backend implements:
     fit(df)               -> None
     predict(df, steps)    -> list[{"timestamp", "predicted_price", "lower", "upper"}]
+    predict_with_diagnostics(df, steps) -> (that list, diagnostics dict | None)
+
+Two sklearn variants (MODEL_VARIANTS):
+  - "tuned" is an evolving population of small models with emotions
+    (ml/evolution.py): each one lives only as long as it beats "no change"
+    on real outcomes, the dead are replaced by children of the strongest,
+    the forecast is the strongest adults' vote, and its band is calibrated
+    on the population's own past errors. Diagnostics per prediction;
+  - "legacy" is the original recursive forecaster, kept exactly as it was
+    as the fixed reference ("control") the tuned one is measured against.
 
 `df` is the output of ml.features.build_feature_frame().
 """
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 from datetime import timedelta
 
@@ -37,6 +46,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from ml.evolution import EvolutionaryForecaster, evolve
 from ml.features import FEATURE_COLUMNS, add_technical_features, make_supervised
 
 logger = logging.getLogger(__name__)
@@ -117,32 +127,17 @@ _LEGACY_GBR_PARAMS: dict = {}
 
 _GBR_PARAMS_BY_VARIANT = {"tuned": _TUNED_GBR_PARAMS, "legacy": _LEGACY_GBR_PARAMS}
 
-# --- Confidence band calibration --------------------------------------------
-#
-# Measured on a walk-forward backtest (ml/walk_forward.py), the raw quantile
-# band ([alpha=0.1, alpha=0.9] GBR models, re-evaluated on every synthetic
-# candle of the recursive forecast) held the real price only ~26% of the time
-# over 24 steps, against the 80% it is meant to. Three reasons, all fixed below:
-#  - quantile models under-cover out of sample -> split-conformal correction
-#    (CQR, Romano et al. 2019): fit the quantile models on the older 75% of
-#    rows, measure how far the newest 25% fall outside, widen by that amount;
-#  - each step's band was one step wide around the previous *prediction*, so
-#    it never grew with the horizon -> half-width grows as k ** exponent;
-#  - past step 1 the quantile models only ever see synthetic candles (whose
-#    volatility_24 collapses toward 0), so their width shrinks -> the per-step
-#    width is frozen at step 1, the only one computed on real candles.
-_BAND_ALPHA = 0.2            # 1 - target coverage of [lower, upper]
-_CQR_MIN_ROWS = 120          # below this, too few calibration rows - skip CQR
-_CQR_CALIBRATION_FRACTION = 0.25
-# 80% band half-width of real k-step ETH log returns grows as k ** e. Measured
-# (not fitted per model: that was too noisy) on real Binance candles: 1h 0.55,
-# 1d 0.57 (stable across both halves of each history). Plain random-walk
-# scaling would be 0.5; crypto's fatter tails over longer horizons push it up.
-BAND_HORIZON_EXPONENT = 0.57
-# Everything above (CQR, horizon-scaled band, taker_buy_volume carried through
-# the recursion) applies to "tuned" only. "legacy" is kept exactly as it was
-# before, as the fixed reference the tuned model is compared against.
-_CALIBRATED_VARIANTS = ("tuned",)
+# Variants that are an evolving population (ml/evolution.py) instead of the
+# recursive forecaster. "legacy" is deliberately not in it: it stays the
+# unchanged recursive reference.
+_EVOLUTION_VARIANTS = ("tuned",)
+
+# Market context (ml/market_context.py) the recursive model also learns from
+# when the caller added it to the frame. Missing values (a source that was
+# down, funding before it existed) become 0 = neutral, since
+# GradientBoostingRegressor can't take NaN. Like sentiment, each is held at
+# its last known value over the forecast.
+LEGACY_CONTEXT_COLUMNS = ("fear_greed", "fear_greed_chg", "funding", "premium")
 
 
 class PricePredictor:
@@ -152,18 +147,23 @@ class PricePredictor:
         feature_cols: list[str] | None = None,
         ensemble_size: int = len(_ENSEMBLE_SEEDS),
         model_variant: str = "tuned",
+        evolution_key: str | None = None,
     ):
+        """`evolution_key` (e.g. "ethereum_1h"): the "tuned" population for
+        it keeps living across fits and app restarts (ml/evolution.evolve)
+        instead of being replayed from scratch on each fit."""
         if model_variant not in MODEL_VARIANTS:
             raise ValueError(f"Unknown model_variant: {model_variant!r}; must be one of {MODEL_VARIANTS}")
         self.backend = backend
         self.feature_cols = feature_cols or FEATURE_COLUMNS
+        self._fit_cols = list(self.feature_cols)  # + the context columns present at fit time
         self.ensemble_size = max(1, min(ensemble_size, len(_ENSEMBLE_SEEDS)))
         self.model_variant = model_variant
+        self.evolution_key = evolution_key
         self._models = []          # ensemble of mean predictors (sklearn backend)
         self._models_lower = []    # ensemble of lower-quantile predictors
         self._models_upper = []    # ensemble of upper-quantile predictors
-        self._cqr_q = 0.0           # conformal widening of the quantile band (log-return units)
-        self._cqr_calibration_rows = 0  # rows the widening was measured on (0 = skipped)
+        self._evolution: EvolutionaryForecaster | None = None  # see _EVOLUTION_VARIANTS
         self._model = None          # single-model backends (prophet)
         self._last_close = None
         self._fitted = False
@@ -181,12 +181,20 @@ class PricePredictor:
         return self
 
     def predict(self, df: pd.DataFrame, steps: int, interval: str = "1h") -> list[dict]:
+        return self.predict_with_diagnostics(df, steps, interval)[0]
+
+    def predict_with_diagnostics(self, df: pd.DataFrame, steps: int, interval: str = "1h") -> tuple[list[dict], dict | None]:
+        """Same forecast as predict(), plus the diagnostics log of an
+        evolution variant (None for the others). Returned rather than stored on self:
+        one fitted predictor is shared by concurrent requests (api/services)."""
         if not self._fitted:
             raise RuntimeError("Call fit() before predict()")
         if self.backend == "sklearn":
-            return self._predict_sklearn(df, steps, interval)
+            if self._evolution is not None:
+                return self._predict_evolution(df, steps, interval)
+            return self._predict_sklearn(df, steps, interval), None
         if self.backend == "prophet":
-            return self._predict_prophet(df, steps, interval)
+            return self._predict_prophet(df, steps, interval), None
         raise ValueError(f"Unknown backend: {self.backend!r}")
 
     def save(self, path: str) -> None:
@@ -211,15 +219,40 @@ class PricePredictor:
             if not self._models:
                 return None
             importances = np.mean([m.feature_importances_ for m in self._models], axis=0)
-            return dict(zip(self.feature_cols, (float(v) for v in importances)))
+            return dict(zip(self._fit_cols, (float(v) for v in importances)))
         return None
 
     # -- sklearn backend (default) --------------------------------------
 
+    def _predict_evolution(self, df: pd.DataFrame, steps: int, interval: str) -> tuple[list[dict], dict]:
+        path, diagnostics = self._evolution.predict(df, steps)
+        origin = float(df["close"].iloc[-1])
+        step_delta = _INTERVAL_TIMEDELTA[interval]
+        ts = df.index[-1]
+        diagnostics["origin_close"] = origin
+        results = []
+        for log_return, log_low, log_high in path:
+            ts = ts + step_delta
+            results.append({
+                "timestamp": ts,
+                "predicted_price": origin * np.exp(log_return),
+                "lower": origin * np.exp(log_low),
+                "upper": origin * np.exp(log_high),
+            })
+        return results, diagnostics
+
     def _fit_sklearn(self, df: pd.DataFrame) -> None:
         from sklearn.ensemble import GradientBoostingRegressor
 
-        X, y = make_supervised(df, self.feature_cols)
+        if self.model_variant in _EVOLUTION_VARIANTS:
+            self._evolution = evolve(df, self.evolution_key)
+            self._models = []  # ridge organisms: no tree feature importances
+            return
+
+        context = [c for c in LEGACY_CONTEXT_COLUMNS if c in df.columns]
+        self._fit_cols = list(self.feature_cols) + context
+        df = df.assign(**{c: df[c].fillna(0.0) for c in context})
+        X, y = make_supervised(df, self._fit_cols)
         if len(X) < 30:
             raise ValueError(
                 f"Not enough history to train ({len(X)} rows) - need at least 30. "
@@ -234,46 +267,23 @@ class PricePredictor:
         seeds = _ENSEMBLE_SEEDS[: self.ensemble_size]
         gbr_params = _GBR_PARAMS_BY_VARIANT[self.model_variant]
         self._models = [GradientBoostingRegressor(random_state=s, **gbr_params).fit(X, y) for s in seeds]
-
-        # Conformalized quantile regression (see _BAND_ALPHA's comment): the
-        # quantile models train on the older rows only, so the newest rows
-        # (in time order - never shuffled) are an honest out-of-sample check
-        # of how far reality lands outside their band.
-        calibrated = self.model_variant in _CALIBRATED_VARIANTS
-        if calibrated and len(X) >= _CQR_MIN_ROWS:
-            split = int(len(X) * (1 - _CQR_CALIBRATION_FRACTION))
-            X_fit, y_fit, X_cal, y_cal = X.iloc[:split], y.iloc[:split], X.iloc[split:], y.iloc[split:]
-        else:
-            X_fit, y_fit, X_cal, y_cal = X, y, None, None
-        low_alpha, high_alpha = (_BAND_ALPHA / 2, 1 - _BAND_ALPHA / 2) if calibrated else (0.1, 0.9)
         self._models_lower = [
-            GradientBoostingRegressor(loss="quantile", alpha=low_alpha, random_state=s, **gbr_params).fit(X_fit, y_fit)
+            GradientBoostingRegressor(loss="quantile", alpha=0.1, random_state=s, **gbr_params).fit(X, y)
             for s in seeds
         ]
         self._models_upper = [
-            GradientBoostingRegressor(loss="quantile", alpha=high_alpha, random_state=s, **gbr_params).fit(X_fit, y_fit)
+            GradientBoostingRegressor(loss="quantile", alpha=0.9, random_state=s, **gbr_params).fit(X, y)
             for s in seeds
         ]
-        self._cqr_q = 0.0
-        self._cqr_calibration_rows = 0 if X_cal is None else len(X_cal)
-        if X_cal is not None:
-            lo = np.mean([m.predict(X_cal) for m in self._models_lower], axis=0)
-            hi = np.mean([m.predict(X_cal) for m in self._models_upper], axis=0)
-            scores = np.maximum(lo - y_cal.to_numpy(), y_cal.to_numpy() - hi)
-            n = len(scores)
-            level = min(1.0, math.ceil((n + 1) * (1 - _BAND_ALPHA)) / n)
-            self._cqr_q = float(np.quantile(scores, level, method="higher"))
 
     def _predict_sklearn(self, df: pd.DataFrame, steps: int, interval: str) -> list[dict]:
-        def step_fn(history: pd.DataFrame, with_band: bool) -> tuple[float, float, float] | None:
-            row = history.iloc[[-1]][self.feature_cols]
+        def step_fn(history: pd.DataFrame) -> tuple[float, float, float] | None:
+            row = history.iloc[[-1]][self._fit_cols]
             if row.isna().any(axis=None):
                 return None
             log_return = float(np.mean([m.predict(row)[0] for m in self._models]))
-            if not with_band:
-                return log_return, log_return, log_return
-            log_return_low = float(np.mean([m.predict(row)[0] for m in self._models_lower])) - self._cqr_q
-            log_return_high = float(np.mean([m.predict(row)[0] for m in self._models_upper])) + self._cqr_q
+            log_return_low = float(np.mean([m.predict(row)[0] for m in self._models_lower]))
+            log_return_high = float(np.mean([m.predict(row)[0] for m in self._models_upper]))
             return log_return, log_return_low, log_return_high
 
         return self._iterate_recursive(df, steps, interval, step_fn)
@@ -295,21 +305,10 @@ class PricePredictor:
         df: pd.DataFrame,
         steps: int,
         interval: str,
-        step_fn: Callable[[pd.DataFrame, bool], tuple[float, float, float] | None],
+        step_fn: Callable[[pd.DataFrame], tuple[float, float, float] | None],
     ) -> list[dict]:
-        """Band: step_fn's [low, high] is only asked for at step 1 (real
-        candles). Its distance below/above the point is then held fixed and
-        scaled by k ** BAND_HORIZON_EXPONENT around the cumulative forecast
-        at step k, so the band widens with the horizon and always contains
-        the point."""
         step_delta = _INTERVAL_TIMEDELTA[interval]
-        calibrated = self.model_variant in _CALIBRATED_VARIANTS
-        # taker_buy_volume is carried along so taker_buy_ratio keeps its real
-        # values on real candles (it used to be dropped here, which turned the
-        # feature into a constant 0.5 at predict time only).
-        carried = ("open", "high", "low", "close", "volume", "taker_buy_volume") if calibrated else ("open", "high", "low", "close", "volume")
-        ohlcv = [c for c in carried if c in df.columns]
-        history = add_technical_features(df[ohlcv].copy())
+        history = add_technical_features(df[["open", "high", "low", "close", "volume"]].copy())
         # None of sentiment/btc_return_1/tvl_momentum extrapolate from OHLCV
         # alone (they come from merge_sentiment/merge_btc_returns/
         # merge_defi_tvl in build_feature_frame, which this recursive
@@ -322,38 +321,30 @@ class PricePredictor:
         history["btc_return_1"] = df["btc_return_1"] if "btc_return_1" in df.columns else last_btc_return
         last_tvl_momentum = df["tvl_momentum"].iloc[-1] if "tvl_momentum" in df.columns and len(df) else 0.0
         history["tvl_momentum"] = df["tvl_momentum"] if "tvl_momentum" in df.columns else last_tvl_momentum
+        context = [c for c in self._fit_cols if c in LEGACY_CONTEXT_COLUMNS]
+        last_context = {c: (float(df[c].fillna(0.0).iloc[-1]) if c in df.columns and len(df) else 0.0) for c in context}
+        for c in context:
+            history[c] = df[c].fillna(0.0) if c in df.columns else last_context[c]
 
         results = []
         last_timestamp = history.index[-1]
-        origin_close = float(history["close"].iloc[-1])
-        cumulative = 0.0
-        below = above = 0.0
-        for k in range(1, steps + 1):
-            step = step_fn(history, k == 1 or not calibrated)
+        for _ in range(steps):
+            step = step_fn(history)
             if step is None:
                 # Not enough rolling history yet (e.g. right at the start) - stop early
                 # rather than feeding the model garbage.
                 logger.warning("Insufficient rolling history for a further step, stopping early")
                 break
             log_return, log_return_low, log_return_high = step
-            if k == 1:
-                # max(0, ...) keeps the point inside the band even if the
-                # quantile models disagree with the mean model.
-                below = max(0.0, log_return - min(log_return_low, log_return_high))
-                above = max(0.0, max(log_return_low, log_return_high) - log_return)
 
             last_close = float(history["close"].iloc[-1])
             predicted_price = last_close * np.exp(log_return)
-            cumulative += log_return
-            if calibrated:
-                growth = k ** BAND_HORIZON_EXPONENT
-                lower = origin_close * np.exp(cumulative - below * growth)
-                upper = origin_close * np.exp(cumulative + above * growth)
-            else:
-                # legacy: one-step band around the previous (predicted) close,
-                # point estimate included so it always falls inside.
-                lower = last_close * np.exp(min(log_return_low, log_return_high, log_return))
-                upper = last_close * np.exp(max(log_return_low, log_return_high, log_return))
+            # Including log_return itself in the min/max (not just the two
+            # quantile bounds) guarantees the point estimate always falls
+            # inside [lower, upper] - true by construction for sklearn's
+            # same-distribution quantile models.
+            lower = last_close * np.exp(min(log_return_low, log_return_high, log_return))
+            upper = last_close * np.exp(max(log_return_low, log_return_high, log_return))
 
             last_timestamp = last_timestamp + step_delta
             results.append(
@@ -375,16 +366,17 @@ class PricePredictor:
                 "volume": history["volume"].iloc[-1],
                 "sentiment": last_sentiment,
             }
-            if "taker_buy_volume" in history.columns:
-                new_row["taker_buy_volume"] = 0.5 * new_row["volume"]  # neutral: no buy/sell lean
             history = pd.concat([history, pd.DataFrame([new_row], index=[last_timestamp])])
-            history = add_technical_features(history[ohlcv])
+            history = add_technical_features(history[["open", "high", "low", "close", "volume"]])
             history["sentiment"] = history["sentiment"] if "sentiment" in history else last_sentiment
             history.loc[last_timestamp, "sentiment"] = last_sentiment
             history["btc_return_1"] = history["btc_return_1"] if "btc_return_1" in history else last_btc_return
             history.loc[last_timestamp, "btc_return_1"] = last_btc_return
             history["tvl_momentum"] = history["tvl_momentum"] if "tvl_momentum" in history else last_tvl_momentum
             history.loc[last_timestamp, "tvl_momentum"] = last_tvl_momentum
+            for c in context:
+                history[c] = history[c] if c in history else last_context[c]
+                history.loc[last_timestamp, c] = last_context[c]
 
         return results
 
