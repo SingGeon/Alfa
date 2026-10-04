@@ -11,3 +11,7 @@ models/*.h5
 
 # prediction evaluation output (SQLite + generated charts)
 data/
+
+.ipynb_checkpoints/
+Untitled.ipynb
+untitled.py

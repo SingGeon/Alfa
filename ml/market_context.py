@@ -29,9 +29,16 @@ from datetime import timedelta
 
 import numpy as np
 import pandas as pd
-import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _get_json(url, params=None):
+    """GET with retries/backoff (data_collector.http_utils): a long paging
+    over the whole history shouldn't die on one slow response."""
+    from data_collector.http_utils import get_json
+
+    return get_json(url, params=params, max_retries=6, timeout=30)
 
 CONTEXT_COLUMNS = ("fear_greed", "fear_greed_chg", "news_sentiment", "tvl_chg_1d", "tvl_chg_7d", "funding", "premium")
 _FAPI = "https://fapi.binance.com/fapi/v1"
@@ -54,7 +61,7 @@ def _cached(key: tuple, ttl: float, fn):
 
 def fetch_fear_greed() -> pd.Series:
     """Daily index value (0-100), indexed by UTC date (Timestamp at 00:00)."""
-    data = requests.get("https://api.alternative.me/fng/", params={"limit": 0}, timeout=20).json()["data"]
+    data = _get_json("https://api.alternative.me/fng/", params={"limit": 0})["data"]
     s = pd.Series({pd.Timestamp(int(d["timestamp"]), unit="s", tz="UTC"): float(d["value"]) for d in data})
     return s.sort_index()
 
@@ -64,11 +71,11 @@ def fetch_funding(symbol: str, start: pd.Timestamp | None = None) -> pd.Series:
     out = []
     params = {"symbol": symbol, "limit": 1000}
     if start is None:
-        out = requests.get(f"{_FAPI}/fundingRate", params=params, timeout=15).json()
+        out = _get_json(f"{_FAPI}/fundingRate", params=params)
     else:
         params["startTime"] = int(start.timestamp() * 1000)
         while True:
-            page = requests.get(f"{_FAPI}/fundingRate", params=params, timeout=15).json()
+            page = _get_json(f"{_FAPI}/fundingRate", params=params)
             if not isinstance(page, list) or not page:
                 break
             out += page
@@ -88,7 +95,7 @@ def fetch_premium(symbol: str, interval: str, total: int = 1000) -> pd.Series:
         params = {"symbol": symbol, "interval": interval, "limit": 1500}
         if end:
             params["endTime"] = end
-        page = requests.get(f"{_FAPI}/premiumIndexKlines", params=params, timeout=15).json()
+        page = _get_json(f"{_FAPI}/premiumIndexKlines", params=params)
         if not isinstance(page, list) or not page:
             break
         out = page + out

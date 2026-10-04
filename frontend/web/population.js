@@ -9,12 +9,14 @@ const TRAITS = [
   { key: "temperament", digits: 2, range: [0, 0.6] },
   { key: "news_sensitivity", digits: 2, range: [-1, 1], mid: 0 },
   { key: "window", digits: 0, range: null },
+  { key: "patience", digits: 2, range: [0, 5] },
   { key: "avg_generation", digits: 0, range: null },
 ];
 const EMOJI = { fear: "😨", caution: "🤔", calm: "😐", confidence: "🙂", euphoria: "🤩" };
 const PAGE_SIZE = 50;
 
-const state = { interval: "1h", page: 1, report: null };
+const state = { interval: "1h", page: 1, report: null, genTo: null };
+const fmtEur = (v) => (v == null ? "—" : `${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`);
 let charts = [];
 
 const $ = (id) => document.getElementById(id);
@@ -61,6 +63,48 @@ function renderSummary(r) {
     tile(t("pop.summary.dir1"), tr[1] ? `${tr[1].direction_pct}%` : "—"),
     tile(t("pop.summary.dir24"), tr[24] ? `${tr[24].direction_pct}%` : "—"),
   ].join("");
+}
+
+// -- money ---------------------------------------------------------------
+
+let moneyChart = null;
+
+function renderMoney(r) {
+  const m = r.money;
+  if (moneyChart) { moneyChart.remove(); moneyChart = null; }
+  if (!m) { $("moneyTiles").innerHTML = ""; return; }
+  const tile = (label, value, cls = "") => `<div class="box-stat"><span>${esc(label)}</span><b class="${cls}">${value}</b></div>`;
+  const sign = (v) => (v > 0 ? "pop-up" : v < 0 ? "pop-down" : "");
+  const pos = m.fund_position > 0 ? t("pop.money.long") : m.fund_position < 0 ? t("pop.money.short") : t("pop.money.out");
+  $("moneyTiles").innerHTML = [
+    tile(t("pop.money.fund"), `${fmtEur(m.fund)} <small class="${sign(m.fund_return_pct)}">${fmtPct(m.fund_return_pct, 1)}</small>`),
+    tile(t("pop.money.hold"), `${fmtEur(m.buy_hold)} <small class="${sign(m.buy_hold_return_pct)}">${fmtPct(m.buy_hold_return_pct, 1)}</small>`),
+    tile(t("pop.money.fundTrades"), `${fmtNum(m.fund_trades)} · ${fmtEur(m.fund_fees)}`),
+    tile(t("pop.money.fundNow"), `${pos} ${m.fund_position ? `${Math.round(Math.abs(m.fund_position) * 100)}%` : ""}`),
+    tile(t("pop.money.richest"), m.richest ? `#${m.richest.id} · ${fmtEur(m.richest.money)}` : "—"),
+    tile(t("pop.money.positions"), tf("pop.money.positionsValue", { long: m.long, short: m.short, out: m.out })),
+  ].join("");
+
+  const css = getComputedStyle(document.documentElement);
+  const pred = css.getPropertyValue("--pred").trim() || "#6d7cf5";
+  const muted = css.getPropertyValue("--text-muted").trim() || "#676f83";
+  const pts = r.timeline.filter((p) => p.fund != null).map((p) => ({ ...p, time: Math.floor(new Date(p.time).getTime() / 1000) }))
+    .filter((p, i, a) => i === 0 || p.time > a[i - 1].time);
+  const el = $("moneyChart");
+  moneyChart = LightweightCharts.createChart(el, { ...chartOptions(el), rightPriceScale: { borderVisible: false, minimumWidth: 70, mode: LightweightCharts.PriceScaleMode.Logarithmic } });
+  const fmt = { type: "custom", formatter: (v) => `${v.toFixed(0)} €` };
+  const hold = moneyChart.addLineSeries({ color: muted, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, priceFormat: fmt, title: t("pop.money.hold") });
+  hold.setData(pts.map((p) => ({ time: p.time, value: p.buy_hold })));
+  const fund = moneyChart.addLineSeries({ color: pred, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, priceFormat: fmt, title: t("pop.money.fund") });
+  fund.setData(pts.map((p) => ({ time: p.time, value: p.fund })));
+  fund.createPriceLine({ price: 100, color: muted, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: false });
+  const byTime = new Map(pts.map((p) => [p.time, p]));
+  const readout = (p) => {
+    $("moneyReadout").textContent = p ? `${fmtEur(p.fund)} · ${fmtEur(p.buy_hold)} · ${fmtDay(new Date(p.time * 1000).toISOString())}` : "";
+  };
+  moneyChart.subscribeCrosshairMove((param) => readout(param.time ? byTime.get(param.time) : pts[pts.length - 1]));
+  moneyChart.timeScale().fitContent();
+  readout(pts[pts.length - 1]);
 }
 
 // -- time line (three synced charts) ------------------------------------
@@ -233,7 +277,7 @@ function renderGenerations(r) {
     const top = Object.entries(g.input_shares).slice(0, 3).map(([k, v]) => `${esc(geneName(k))} ${Math.round(v * 100)}%`).join(", ");
     const dead = Object.values(g.causes).reduce((a, b) => a + b, 0);
     const causes = dead ? Object.entries(g.causes).filter(([, n]) => n).map(([c, n]) => `${causeChip(c)} <span class="pop-small">${Math.round((n / dead) * 100)}%</span>`).join(" ") : "—";
-    return `<tr class="eval-clickable" data-generation="${g.from}">
+    return `<tr class="eval-clickable" data-generation="${g.from}" data-generation-to="${g.to}">
       <td>${g.from === g.to ? g.from : `${g.from}–${g.to}`}</td>
       <td class="num">${fmtNum(g.organisms)}</td>
       <td class="num">${fmtNum(g.alive)}</td>
@@ -244,6 +288,7 @@ function renderGenerations(r) {
       <td class="num">${fmtNum(g.temperament, 2)}</td>
       <td class="num">${fmtNum(g.news_sensitivity, 2)}</td>
       <td class="num">${fmtNum(g.window)}</td>
+      <td class="num">${fmtNum(g.patience, 2)}</td>
     </tr>`;
   }).join("");
 }
@@ -251,7 +296,21 @@ function renderGenerations(r) {
 // -- graveyard -------------------------------------------------------------
 
 function filters() {
-  return Object.fromEntries(new FormData($("deathFilters")).entries());
+  const f = Object.fromEntries(new FormData($("deathFilters")).entries());
+  if (state.genTo != null && f.generation !== "") f.generation_to = state.genTo;
+  return f;
+}
+
+function renderActiveFilter() {
+  const f = filters();
+  const parts = [];
+  if (f.cause) parts.push(t(`pop.cause.${f.cause}`));
+  if (f.generation !== "") parts.push(f.generation_to ? tf("pop.filter.generationRange", { from: f.generation, to: f.generation_to }) : tf("pop.filter.generationOne", { n: f.generation }));
+  if (f.organism) parts.push(`#${f.organism}`);
+  $("activeFilter").hidden = !parts.length;
+  $("activeFilter").innerHTML = parts.length
+    ? `${esc(tf("pop.filter.active", { what: parts.join(" · ") }))} <button type="button" class="eval-btn" id="clearFilters">${esc(t("eval.filter.reset"))}</button>`
+    : "";
 }
 
 function killerText(k) {
@@ -265,6 +324,7 @@ function marketText(d) {
 }
 
 async function loadDeaths() {
+  renderActiveFilter();
   try {
     const data = await api("/api/evolution/deaths", { ...filters(), page: state.page, page_size: PAGE_SIZE });
     state.page = data.page;
@@ -276,12 +336,13 @@ async function loadDeaths() {
         <td class="num">${fmtNum(d.age)}</td>
         <td class="num">${d.generation}</td>
         <td>${causeChip(d.cause)}</td>
-        <td class="pop-wrap">${killerText(d.killing_prediction)}</td>
+        <td class="num">${fmtEur(d.money)} / ${fmtEur(d.peak_money)}</td>
+        <td class="num">${fmtNum(d.trades)} / ${fmtEur(d.fees_paid)}</td>
         <td class="pop-wrap">${marketText(d)}</td>
         <td>${emotion(d.emotion)}</td>
         <td class="num">${d.wins} / ${d.losses} / ${d.combos}</td>
         <td class="pop-wrap">${d.inputs.map((g) => esc(geneName(g))).join(", ")}</td>
-      </tr>`).join("") || `<tr class="empty-row"><td colspan="10">${esc(t("pop.graveyard.none"))}</td></tr>`;
+      </tr>`).join("") || `<tr class="empty-row"><td colspan="11">${esc(t("pop.graveyard.none"))}</td></tr>`;
     $("pageInfo").textContent = tf("pop.page", { page: data.page, pages: data.pages });
     $("prevPage").disabled = data.page <= 1;
     $("nextPage").disabled = data.page >= data.pages;
@@ -294,7 +355,9 @@ function renderAlive(r) {
   $("aliveRows").innerHTML = r.alive.map((o) => `
     <tr class="eval-clickable" data-id="${o.id}">
       <td>${o.id}</td>
-      <td class="num">${fmtNum(o.energy, 1)}</td>
+      <td class="num">${fmtEur(o.money)}</td>
+      <td>${o.position > 0 ? t("pop.money.long") : o.position < 0 ? t("pop.money.short") : t("pop.money.out")}${o.position ? ` ${Math.round(Math.abs(o.position) * 100)}%` : ""}</td>
+      <td class="num">${fmtNum(o.trades)} / ${fmtEur(o.fees_paid)}</td>
       <td>${emotion(o.emotion)}</td>
       <td class="num">${fmtNum(o.age)}</td>
       <td class="num">${o.generation}</td>
@@ -315,6 +378,7 @@ async function openOrganism(id) {
       [t("pop.trait.temperament"), fmtNum(o.temperament, 2)],
       [t("pop.trait.news_sensitivity"), fmtNum(o.news_sensitivity, 2)],
       [t("pop.trait.window"), fmtNum(o.window)],
+      [t("pop.trait.patience"), fmtNum(o.patience, 2)],
     ].map(([k, v]) => `<span class="pop-chip">${esc(k)}: <b>${v}</b></span>`).join(" ");
     const chip = (a) => `<button type="button" class="pop-chip pop-link ${a.dead ? "dead" : "alive"}" data-id="${a.id}">#${a.id}${a.generation != null ? ` · g${a.generation}` : ""}${a.dead ? " †" : ""}</button>`;
     const levels = {};
@@ -332,7 +396,8 @@ async function openOrganism(id) {
       <p>${esc(story)}</p>
       ${o.dead ? `<p>${esc(tf("pop.story.market", { price: fmtNum(o.price, 2), move: fmtPct(o.move_24_pct), mood: t(`dashboard.evo.emotion.${o.emotion}`) }))}</p>
       ${o.killing_prediction ? `<p>${esc(killerText(o.killing_prediction))}</p>` : ""}
-      <p>${esc(tf("pop.story.energy", { gained: fmtNum(o.lifetime_gained, 1), lost: fmtNum(o.lifetime_lost_to_misses, 1) }))}</p>` : ""}
+      ` : ""}
+      <p>${esc(tf("pop.story.money", { money: fmtEur(o.money), peak: fmtEur(o.peak_money), trades: fmtNum(o.trades), fees: fmtEur(o.fees_paid), pnl: fmtEur(o.trading_pnl) }))}</p>
       <h3>${esc(t("pop.story.genes"))}</h3>
       <p>${o.inputs.map((g) => `<span class="pop-chip">${esc(geneName(g))}</span>`).join(" ")}</p>
       <p>${genes}</p>
@@ -356,6 +421,7 @@ async function load() {
     const r = await api("/api/evolution/report");
     state.report = r;
     renderSummary(r);
+    renderMoney(r);
     renderTimeline(r);
     renderCauses(r);
     renderSurvival(r);
@@ -367,7 +433,7 @@ async function load() {
     showError(exc.message);
     charts.forEach((c) => c.remove());
     charts = [];
-    ["summaryTiles", "causes", "survival", "geneShares", "traits", "generationRows", "aliveRows", "deathRows"].forEach((id) => ($(id).innerHTML = ""));
+    ["summaryTiles", "moneyTiles", "causes", "survival", "geneShares", "traits", "generationRows", "aliveRows", "deathRows"].forEach((id) => ($(id).innerHTML = ""));
     return;
   }
   state.page = 1;
@@ -381,16 +447,25 @@ $("intervalTabs").addEventListener("click", (e) => {
   try { localStorage.setItem("pop.interval", state.interval); } catch { /* storage unavailable */ }
   load();
 });
-$("deathFilters").addEventListener("input", () => { state.page = 1; loadDeaths(); });
-$("deathFilters").addEventListener("reset", () => setTimeout(() => { state.page = 1; loadDeaths(); }));
+$("deathFilters").addEventListener("input", (e) => {
+  if (e.target.name === "generation") state.genTo = null;  // typed by hand: that one generation
+  state.page = 1;
+  loadDeaths();
+});
+$("deathFilters").addEventListener("reset", () => setTimeout(() => { state.genTo = null; state.page = 1; loadDeaths(); }));
 $("prevPage").addEventListener("click", () => { state.page -= 1; loadDeaths(); });
 $("nextPage").addEventListener("click", () => { state.page += 1; loadDeaths(); });
 document.addEventListener("click", (e) => {
   const link = e.target.closest("[data-id]");
   if (link && (link.closest("#deathRows, #aliveRows") || link.classList.contains("pop-link"))) openOrganism(link.dataset.id);
+  if (e.target.id === "clearFilters") {
+    $("deathFilters").reset();
+    return;
+  }
   const gen = e.target.closest("tr[data-generation]");
   if (gen) {
     $("deathFilters").generation.value = gen.dataset.generation;
+    state.genTo = gen.dataset.generationTo !== gen.dataset.generation ? gen.dataset.generationTo : null;
     state.page = 1;
     loadDeaths();
     $("deathFilters").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -398,10 +473,12 @@ document.addEventListener("click", (e) => {
 });
 window.addEventListener("resize", () => {
   ["priceChart", "deathsChart", "moodChart"].forEach((id, i) => charts[i] && charts[i].resize($(id).clientWidth, $(id).clientHeight));
+  if (moneyChart) moneyChart.resize($("moneyChart").clientWidth, $("moneyChart").clientHeight);
 });
 document.addEventListener("langchange", () => {
   if (state.report) {
     renderSummary(state.report);
+    renderMoney(state.report);
     renderCauses(state.report);
     renderSurvival(state.report);
     renderEvolution(state.report);

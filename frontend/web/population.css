@@ -61,3 +61,10 @@
 .pop-chip { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 2px 10px; font-size: 12px; }
 .pop-chip.dead { opacity: 0.7; }
 .pop-chip.alive { border-color: var(--up); }
+
+/* money */
+.pop-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+.pop-key-fund { background: var(--pred); }
+.pop-key-hold { background: var(--text-muted); }
+.pop-active-filter { margin: 10px 0 0; font-size: 13px; color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 6px 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pop-active-filter[hidden] { display: none; }

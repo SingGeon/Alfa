@@ -39,6 +39,9 @@ Combines:
 - [Prediction models](#prediction-models)
   - [Evolving population](#evolving-population)
   - [Walk-forward backtest](#walk-forward-backtest)
+- [Strategy fund](#strategy-fund)
+  - [Strategy lab](#strategy-lab)
+  - [Evolving strategies](#evolving-strategies)
 - [Performance](#performance)
 - [Tests](#tests)
 - [Extending to other cryptocurrencies](#extending-to-other-cryptocurrencies)
@@ -196,6 +199,9 @@ ml/
   walk_forward.py               # walk-forward backtest on real Binance candles
   combined_predictor.py         # confidence score + narrative summary
   box_breakout.py               # Dynamic Box Breakout Strategy: boxes, breakout trades, backtest
+  strategy_lab.py               # which way of trading makes the most money after fees (TRAIN/TEST)
+  strategy_evolution.py         # evolving population of strategies (vol-target + Box + range genes)
+  strategy_fund.py              # the live strategy fund on 4h/1d: report saved to data/strategy_fund/
 
 scout/
   universe.py                   # what gets scanned: underdogs + a separate mega-cap tier
@@ -231,10 +237,12 @@ frontend/
     history.html / history.js                   # day history (daily overviews)
     visual.html / visual.js                     # visual history: by model/interval or by day, with stats
     population.html / .css / .js                # the evolving model's population: deaths, generations, genes
+    fund.html / .css / .js                      # the strategy fund: position now and why, money, years, genes
 
 docs/
   images/                        # screenshots and charts used in this README
   scripts/band_charts.py         # regenerates docs/images/band-*.png from a real backtest
+  scripts/strategy_charts.py     # regenerates docs/images/strategy-*.png (after ml.strategy_fund)
 
 tests/                          # pytest, fully offline (mongomock + requests-mock)
 ```
@@ -401,6 +409,7 @@ settings, for tests and experiments.
 | `GET /api/summary?interval=&lang=en\|ro` | Prediction + narrative summary + supporting news |
 | `GET /api/gas` | On-chain gas price (needs `ETHERSCAN_API_KEY`) |
 | `GET /api/patterns?interval=&lang=en\|ro` | Rule-based candlestick + geometric chart pattern detection |
+| `GET /api/strategy/fund?interval=4h\|1d` | The evolving strategy fund: position now and its three pieces, money vs buy & hold since 2020 and on unseen years, year by year, genes (see [Strategy fund](#strategy-fund)) |
 | `GET /api/box-breakout?interval=` | Self-tuning Box Breakout strategy: boxes, trades, settings history, out-of-sample stats (see [Box Breakout strategy](#box-breakout-strategy)) |
 | `GET /api/scout?asset_type=crypto\|stock&limit=` | Latest Scout AI scan results, ranked |
 | `GET /api/scout/detail?asset_type=&id=&lang=en\|ro` | Full per-asset detail (chart, prediction, narrative, news) |
@@ -612,19 +621,35 @@ instead of dropping the row from training.
 `tuned` (`ml/evolution.py`) is not one model but a population of 24 small
 ones that compete to stay alive on the real price history.
 
-- **Life.** Every model predicts the log return 1, 2, 4, 8, 12 and 24
-  candles ahead. When a prediction's target candle closes, it is compared
-  with "the price stays where it is": closer than that earns energy,
-  further costs energy, and just living costs a little every candle. At 0
-  energy the model dies. A model that can't beat "no change" can't stay
-  alive for long. Being right further ahead is worth more: each horizon's
-  result is weighted by √horizon (24 candles ahead counts ~5× one candle
-  ahead), and being right on **every** horizon that resolved on the same
-  candle (at least 3) is a **combo** worth 50% more energy that candle.
-  Misses hurt more the further off they are: the penalty grows with the
-  square of the miss (a miss twice as bad as "no change" costs 4, not 2).
-- **Birth.** Each dead model is replaced by a child of two strong ones
-  (tournament selection on energy): their genes mixed, then mutated. Nobody
+- **Money is life.** Every model predicts the log return 1, 2, 4, 8, 12
+  and 24 candles ahead and **trades 100 € (virtual) with it**: long, short
+  or out of the market, up to all of its money (no leverage). It pays
+  Binance's 0.1% fee on every trade and a **daily tax of 0.05 €** (~18 € a
+  year; ETH rose ~26% a year on average), charged per candle by its length
+  so it's the same on every interval, and **3× that on days its money sits
+  out of the market**: it is pushed to trade and must earn at least its tax
+  to survive. Its energy *is* its money: below 10 € it dies. (`DAILY_TAX`,
+  `IDLE_TAX_MULT` in `ml/evolution.py`.)
+  - *Size*: half the Kelly fraction (expected move per candle / its
+    variance). Kelly is the bet that grows money fastest in the long run;
+    half of it because the edge is only an estimate (full Kelly on an
+    overestimated edge took the 15m and 1h funds to zero).
+  - *When*: it enters or flips only when the move expected over its
+    24-candle forecast beats its **patience** gene in round trips of
+    fees; it keeps a position while the forecast still points the same
+    way (holding costs nothing) and leaves when it turns.
+  - *The goal is the most money, not just surviving*: the richest have
+    the most children and the most weight in the vote, and every 24
+    candles the adult growing its money the slowest is replaced by a child
+    of the rich ("outcompeted"). Causes of death: outcompeted, one big loss
+    (25%+ in one candle), fees, bad trades, taxes.
+  - The **fund** is the population's vote trading 100 € the same way, next
+    to buying ETH with 100 € and holding it. Returns are ETH/USDT's; the
+    EUR/USD rate is ignored.
+  - Combos (right on every horizon at once) and prediction accuracy are
+    still tracked and shown, but only money keeps a model alive.
+- **Birth.** Each dead model is replaced by a child of two rich ones
+  (tournament selection on money): their genes mixed, then mutated. Nobody
   tunes anything by hand; the population learns by selection.
 - **Genes.** Which inputs it looks at (momentum, trend, long context,
   volatility, volume, RSI/Bollinger, BTC, and the market context below),
@@ -696,18 +721,31 @@ genes, and with the market context + news-swayed moods:
 
 | Interval | Candles lived | Deaths | Direction right, 1 / 24 ahead: price only | with context + news |
 |---|---|---|---|---|
-| 15m | 319,310 | 21,869 | 50.4% / 49.5% | 50.3% / 49.7% |
-| 1h | 79,823 | 5,595 | 50.3% / 49.2% | 50.0% / 49.0% |
-| 4h | 19,953 | 1,277 | 50.7% / 49.7% | 50.8% / 48.3% |
-| 1d | 3,308 | 192 | 51.0% / 46.5% | 50.5% / 44.7% |
+| 15m | 319,398 | 13,295 | 50.6% / 49.6% | 50.2% / 49.6% |
+| 1h | 79,844 | 3,313 | 50.6% / 50.4% | 50.4% / 50.1% |
+| 4h | 19,959 | 818 | 50.4% / 49.2% | 50.2% / 49.8% |
+| 1d | 3,309 | 128 | 50.5% / 47.4% | 50.4% / 42.7% |
+
+And its money (100 € each, the fund = the population's vote, same history):
+
+| Interval | Fund | Trades | Fees paid | Buy & hold |
+|---|---|---|---|---|
+| 1w | 158 € | 116 | 4 € | 250 € |
+| 1d | 37 € | 986 | 17 € | 361 € |
+| 4h | 1.61 € | 8,886 | 136 € | 909 € |
+| 1h | 0.09 € | 13,841 | 227 € | 809 € |
+| 15m | 0.03 € | 21,479 | 1,447 € | 936 € |
+
+Trading on a forecast that is right half the time loses to fees, faster
+the shorter the candle. That is what led to the [Strategy fund](#strategy-fund).
 
 With tens of thousands of votes the uncertainty is a few tenths of a
 percent, so this is a firm result: over nine years of ETH, nothing the
 population can see (price, volume, volatility, RSI/Bollinger, BTC, Fear &
 Greed, DeFi TVL, Binance funding and premium, news) predicts the next move
 better than a coin flip, and the extra data didn't change that. Models
-carrying the new genes lived about as long as the others (e.g. 1h: 308-354
-candles vs 339 for price-only genes). The population learned to be
+carrying the new genes lived about as long as the others (e.g. 1h: 470-596
+candles vs 492 for price-only genes). The population learned to be
 cautious instead of guessing, which is why its line stays close to the
 current price.
 
@@ -785,6 +823,105 @@ test of extra inputs (longer context, Binance futures funding rate and
 premium, pooling 10 coins) found the same: at best ~52-53% direction
 accuracy, no gain on the price itself. With fewer than 30 windows the
 script warns that small differences don't mean anything.
+
+## Strategy fund
+
+The evolving population above showed that where ETH goes next is not
+predictable here. How much it will move is: the volatility of the last day
+predicts the next day's with a correlation of 0.66, against -0.006 for the
+direction. The strategy fund trades on that (`ml/strategy_lab.py`,
+`ml/strategy_evolution.py`, `ml/strategy_fund.py`, page `/fund.html`,
+"💼 Strategy fund" in the top bar, and a card on the dashboard).
+
+Checks made first, nine years of ETH, every model trained only on the past:
+
+| What | Result |
+|---|---|
+| `legacy` direction, 200 independent windows, 24 candles ahead | 1h 50.0% ± 3.5%, 15m 52.5% ± 3.5% |
+| A logistic model's direction, 2,828 out-of-sample days | 52.2% ± 0.9% (always "up": 51.8%); its most confident fifth 52.7% |
+| The pattern recognition signals, 9,091 calls on 1h | 48.6% right; single patterns disagree between 1h and 4h |
+| Box Breakout, walk-forward (its own settings from the past) | 4h +1,588% vs buy & hold +813%, worst drop 74%; 1h -19% |
+
+![Direction accuracy of every model and signal tested, all within a few points of 50%](docs/images/strategy-direction.png)
+
+### Strategy lab
+
+`ml/strategy_lab.py` trades 100 € (virtual) with Binance's 0.1% fee per
+side. The volatility forecast is refit every year on the years before
+only; each strategy's settings are picked on TRAIN (up to 2022, with at
+most a 60% drop) and scored once on TEST (2023 on):
+
+- `vol_target`: long ETH sized by the volatility forecast, rebalanced only
+  when the target drifts more than a band.
+- `range`: buy low inside the forecast range, sell at its middle (short
+  the mirror on long/short), stand aside when too wild or trending.
+- `box`: the walk-forward Box Breakout trades.
+- `range_vt`, `core_range`, `core_box`: combinations.
+
+```bash
+.venv/bin/python -m ml.strategy_lab --interval 4h
+.venv/bin/python -m ml.strategy_lab --interval 4h --robust core_box   # every setting on TEST, year by year
+```
+
+On TEST, 4h: buy & hold 229 € (worst drop 68%), `vol_target` 170 € (39%),
+`core_box` (vol-target core + Box Breakout) 321 € (48%); 94% of the 96
+`core_box` settings beat buy & hold there. On 1h and 1d no setting of it
+did (0% and 8%). Range trading worked on TRAIN and lost on TEST
+everywhere. The forecast range itself holds: its 80% band contained the
+real high/low of the next 24 candles 77-84% of the time.
+
+![Unseen years: money from 100 EUR and worst drop for every strategy on 1h, 4h and 1d](docs/images/strategy-lab-table.png)
+
+### Evolving strategies
+
+`ml/strategy_evolution.py` makes those pieces genes and lets selection
+pick them on every interval, from the past only: `core`/`target`/`band`
+(the vol-target long), `box_w` (Box Breakout), `range_w`, `center`, `k`,
+`exit`, `stop`, `trend_max`, `long_short` (range trading). A strategy holds
+`core x vol_target + box_w x box + range_w x range`, capped at all of its
+money. Every 30 days each strategy is scored on up to 4 years before (log
+growth after fees minus its worst drop), the 6 weakest of 24 are replaced
+by mutated children of strong ones, and the fund holds the average of the
+best 4 for the next month, averaged again over 3 independent populations
+(one alone varied from 185 € to 464 € on the same 4h TEST, by seed).
+
+| Unseen years (2023 on) | Fund | Worst drop | Buy & hold | Worst drop |
+|---|---|---|---|---|
+| 4h | 501 € (+401%) | 39% | 230 € (+130%) | 68% |
+| 1d | 291 € (+191%) | 48% | 225 € (+125%) | 68% |
+| 1h | 164 € (+64%) | 49% | 230 € (+130%) | 69% |
+
+| ![Strategy fund vs buy & hold on 4h since 2020, log scale](docs/images/strategy-fund-4h.png) | ![Strategy fund vs buy & hold on 1d since 2020, log scale](docs/images/strategy-fund-1d.png) |
+|---|---|
+| 4h: 1,255 € since 2020 (buy & hold 2,081 €); 501 € on the unseen years (230 €). | 1d: 1,001 € since 2020 (buy & hold 2,068 €); 291 € on the unseen years (225 €). |
+
+![Return per calendar year, fund vs buy & hold, on 4h and 1d](docs/images/strategy-years.png)
+
+![The average genes of the best strategies, month by month, on 4h and 1d](docs/images/strategy-genes.png)
+
+The lookback, penalty and seed averaging were chosen on 4h's TEST, so 4h
+is somewhat optimistic; 1d and 1h, run with them unchanged, are the honest
+check. Since 2020 the 4h fund made +1,155% to buy & hold's +1,981%, with
+a 77% worst drop to 81%: it earns less in the big bull years (2020, 2021),
+more in the bad ones (2025 +70% vs -11%), and still fell 61% in 2022. On
+4h selection dropped shorts and moved from the calm long toward Box
+Breakout and range; on 1d it dropped shorts from 2021 to 2025 and took
+them back in 2026; on 1h it kept small positions and the fees ate it, so
+the live fund runs on 4h and 1d only. 15m is still to be tested (`--interval 15m
+--candles 150000`, ~35 min: the walk-forward Box Breakout grows with the
+square of the history).
+
+**Live.** `ml/strategy_fund.py` replays the whole history since August 2017
+(so the same candles always give the same fund: ~1 min on 4h, ~10 s on 1d)
+and saves a report to `data/strategy_fund/`. `run_api.py` runs it in its
+own process at startup and a few minutes past every hour, only for an
+interval a new candle has closed on; the API and pages just read the
+report.
+
+```bash
+.venv/bin/python -m ml.strategy_fund                    # 4h and 1d, by hand
+.venv/bin/python -m ml.strategy_evolution --interval 1d # the research run with year-by-year output
+```
 
 ## Performance
 

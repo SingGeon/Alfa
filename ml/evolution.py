@@ -5,14 +5,16 @@ the log return 1, 2, 4, 8, 12 and 24 candles ahead, and is judged on every
 candle that closes, against the simplest possible rival: "the price stays
 where it is".
 
-  - Energy (life). Every organism starts with START_ENERGY. Each resolved
-    prediction that lands closer to the real price than "no change" earns
-    energy; one that lands further costs energy; living costs METABOLISM per
-    candle. At 0 it dies. A model that can't beat "no change" can't stay
-    alive. Predictions further ahead weigh more (sqrt of the horizon), and
-    being right on every horizon resolved on the same candle is a combo
-    worth COMBO_BONUS more. Misses cost more the further off they are
-    (quadratically, see MISS_PENALTY).
+  - Money is life. Every organism gets START_MONEY (100 EUR, virtual) and
+    trades it on its own forecast: long, short or out of the market, up to
+    its whole money (no leverage), paying FEE per side like Binance, plus a
+    a DAILY_TAX for living - IDLE_TAX_MULT times more on days it keeps its
+    money out of the market, so it must trade and earn at least that much
+    to survive. Its energy *is* its money: below
+    BANKRUPT it dies. The goal is to make as much money as possible: the
+    richest have the most children and the most say in the vote, and every
+    CULL_EVERY candles the adult growing its money the slowest is replaced
+    by a child of the rich ("outcompeted"), even if it isn't bankrupt.
   - Birth. Dead organisms are replaced by children of the strongest living
     ones (tournament selection): genes mixed from two parents, then
     mutated. That is how the population learns, generation by generation,
@@ -21,10 +23,11 @@ where it is".
     volatility, volume, oscillators, BTC, and when available: market
     sentiment, news, DeFi TVL, Binance futures - see ml/market_context.py),
     how much history it learns from, how strongly it is regularized, how
-    bold it is, its temperament (how fast its mood reacts) and its news
-    sensitivity (how much the market's sentiment sways its mood).
-  - Emotions. Each organism has a mood in [0, 1]: its recent win rate
-    against "no change", remembered for about 1 / temperament candles.
+    bold it is, its temperament (how fast its mood reacts), its news
+    sensitivity (how much the market's sentiment sways its mood) and its
+    patience (how big an expected move must be, in fees, before it trades).
+  - Emotions. Each organism has a mood in [0, 1]: its recent rate of
+    profitable candles, remembered for about 1 / temperament candles.
     The news moves it too: the day's news sentiment (the Fear & Greed Index
     on days without news) shifts its mood by up to +/-0.5 x its news
     sensitivity gene, which can be negative (a contrarian). Selection
@@ -76,33 +79,40 @@ HORIZONS = (1, 2, 4, 8, 12, 24)
 H_MAX = max(HORIZONS)
 POPULATION = 24
 TOP_K = 8
-START_ENERGY = 100.0
-ENERGY_GAIN = 12.0          # energy per unit of skill on a resolved prediction
-METABOLISM = 0.25           # energy lost per candle just for living
-# Being right further ahead is worth more: each resolved horizon's skill is
-# weighted by sqrt(h) (24 candles ahead counts ~5x one candle ahead).
+# Money (virtual, EUR). Returns are ETH/USDT's, so the EUR/USD rate is ignored.
+START_MONEY = 100.0
+START_ENERGY = START_MONEY   # energy is money
+FEE = 0.001                 # per side, of the traded amount (Binance spot taker)
+# Every model must earn its keep: a tax per day (charged per candle by its
+# length, so the same on every interval), IDLE_TAX_MULT times higher while
+# its money sits out of the market - it is pushed to trade.
+DAILY_TAX = 0.05            # EUR/day on 100 EUR: ~18 EUR a year (ETH rose ~26%/year on average)
+IDLE_TAX_MULT = 3.0
+KELLY_FRACTION = 0.5        # half-Kelly: the edge is only an estimate, full Kelly over-bets
+BANKRUPT = 10.0             # below this it dies (lost 90%)
+MIN_REBALANCE = 0.1         # ignore position changes smaller than this (fees)
+CULL_EVERY = 24             # every this many candles the slowest-growing adult is replaced
+CULL_MIN_AGE = 96           # only adults this old can be culled (a fair chance first)
+VOTE_WEIGHT_CAP = 3 * START_MONEY
+# Expected move per candle = horizons' forecasts per candle, weighted toward
+# the further ones by sqrt(h).
 HORIZON_WEIGHTS = np.sqrt(np.array(HORIZONS, dtype=float))
-# Combo: right on every horizon that resolved on the same candle (at least
-# COMBO_MIN of them) earns COMBO_BONUS x more energy that candle.
+# Combo (shown, not paid): right on every horizon that resolved on the same
+# candle, at least COMBO_MIN of them.
 COMBO_MIN = 3
-COMBO_BONUS = 0.5
-# The further a prediction misses, the more it hurts: a negative skill s
-# costs s - MISS_PENALTY * s^2 (a miss twice as bad as "no change" costs 4,
-# not 2), down to MAX_PENALTY.
-MISS_PENALTY = 0.5
-MAX_PENALTY = 8.0
-# Cause of death, judged on its last DEATH_LOOKBACK candles: one candle that
-# cost >= FATAL_MISS energy = "fatal_miss"; otherwise more energy lost to
-# misses than to living = "repeated_misses"; otherwise "exhaustion" (it never
-# beat "no change" by enough to pay for living).
+# Cause of death, judged on its last DEATH_LOOKBACK candles: "outcompeted"
+# (culled), "big_loss" (one candle took >= BIG_LOSS of its money), "fees"
+# (fees cost more than trading lost and than taxes), "bad_trades" (trading
+# losses were the biggest cost) or "taxes" (it didn't earn its daily tax).
 DEATH_LOOKBACK = 48
-FATAL_MISS = 25.0
+BIG_LOSS = 0.25
 MIN_TRAIN_ROWS = 120        # history before the replay starts (less on short histories, see fit)
 REFIT_EVERY = 24            # each organism re-learns its weights this often (staggered)
 ADULT_AGE = 12              # younger ones don't vote in the forecast yet
 # 50% band: half the real prices land inside. Narrow like legacy's on the
 # chart, but honest about what it means (legacy's is narrow because it's
 # wrong ~3/4 of the time). (0.10, 0.90) would give an 80% band, ~2x wider.
+MAX_Z = 8.0                 # an input this many sd from its training mean counts as only this far
 BAND_QUANTILES = (0.25, 0.75)
 _BAND_Z = 0.6745              # normal z of the 75% quantile, for the fallback below
 # "step": every step's band is as wide as the vote's typical error on the
@@ -123,7 +133,7 @@ _FRAME_COLS = ("open", "high", "low", "close", "volume", "taker_buy_volume", "bt
 # their source data does (ml/market_context.py), and only from when it does.
 CORE_GROUPS = ("momentum", "trend", "long", "volatility", "volume", "oscillators", "btc")
 NEWS_MOOD_WEIGHT = 0.5      # max mood shift from the news, x the news sensitivity gene
-STATE_VERSION = 5
+STATE_VERSION = 7
 STATE_DIR = Path(__file__).resolve().parent.parent / "data" / "evolution"
 
 EMOTIONS = ((0.30, "fear"), (0.45, "caution"), (0.60, "calm"), (0.75, "confidence"), (1.01, "euphoria"))
@@ -236,15 +246,26 @@ class Organism:
     temperament: float     # how fast its mood reacts to wins/losses
     parents: tuple[int, ...] = ()
     news_sensitivity: float = 0.0  # how much the market's sentiment sways its mood (< 0: contrarian)
-    energy: float = START_ENERGY
+    patience: float = 1.0          # trades only if the expected move > patience x round-trip fee
+    energy: float = START_ENERGY   # = its money
     mood: float = 0.5
     wins: int = 0
     losses: int = 0
     combos: int = 0        # candles where it was right on every resolved horizon
-    trace: list = field(default_factory=list)  # last DEATH_LOOKBACK candles: (gained, lost to misses)
+    trace: list = field(default_factory=list)  # last DEATH_LOOKBACK candles: (pnl, fees, tax, money before)
     worst: tuple | None = None  # its worst resolved prediction on the last candle: (h, predicted, actual)
-    lost_to_misses: float = 0.0
-    gained: float = 0.0
+    position: float = 0.0       # fraction of its money: > 0 long, < 0 short, 0 out
+    peak_money: float = START_MONEY
+    trades: int = 0
+    fees_paid: float = 0.0
+    trading_pnl: float = 0.0
+    tax_paid: float = 0.0
+    fees_last: float = 0.0      # fees paid when it last traded, charged to the next candle's result
+    culled: bool = False        # replaced for growing its money the slowest
+
+    def growth(self, t: int) -> float:
+        """Log growth of its money per candle since birth."""
+        return math.log(max(self.energy, 1e-9) / START_MONEY) / max(self.age(t), 1)
     cols: np.ndarray | None = None
     W: np.ndarray | None = None       # (n_features + 1, len(HORIZONS))
     mu: np.ndarray | None = None
@@ -257,7 +278,7 @@ class Organism:
     def genes(self) -> dict:
         return {"inputs": list(self.groups), "window": self.window, "ridge_alpha": round(10 ** self.log_alpha, 3),
                 "boldness": round(self.boldness, 2), "temperament": round(self.temperament, 2),
-                "news_sensitivity": round(self.news_sensitivity, 2)}
+                "news_sensitivity": round(self.news_sensitivity, 2), "patience": round(self.patience, 2)}
 
 
 class EvolutionaryForecaster:
@@ -281,12 +302,13 @@ class EvolutionaryForecaster:
         k = int(r.integers(1, min(4, len(usable)) + 1))
         groups = tuple(sorted(str(g) for g in r.choice(usable, size=k, replace=False)))
         return self._new(t, groups, int(r.integers(150, 1500)), float(r.uniform(-1, 3)),
-                         float(r.uniform(0.3, 1.5)), float(r.uniform(0.05, 0.4)), (), 0, float(r.uniform(-1, 1)))
+                         float(r.uniform(0.3, 1.5)), float(r.uniform(0.05, 0.4)), (), 0, float(r.uniform(-1, 1)),
+                         float(r.uniform(0, 3)))
 
     def _new(self, t, groups, window, log_alpha, boldness, temperament, parents, generation,
-             news_sensitivity=0.0) -> Organism:
+             news_sensitivity=0.0, patience=1.0) -> Organism:
         org = Organism(self.next_id, t, generation, groups, window, log_alpha, boldness, temperament, parents,
-                       news_sensitivity)
+                       news_sensitivity, patience)
         org.cols = np.array(sorted(i for g in groups for i in self.groups[g]))
         self.next_id += 1
         self.births += 1
@@ -295,7 +317,7 @@ class EvolutionaryForecaster:
     def _child(self, t: int) -> Organism:
         r = self.rng
 
-        def pick():  # tournament of 3 on energy
+        def pick():  # tournament of 3 on money: the richest have the most children
             contenders = r.choice(len(self.alive), size=min(3, len(self.alive)), replace=False)
             return max((self.alive[i] for i in contenders), key=lambda o: o.energy)
 
@@ -313,7 +335,8 @@ class EvolutionaryForecaster:
                          mix(a.log_alpha, b.log_alpha, 0.3, -1, 3), mix(a.boldness, b.boldness, 0.15, 0.1, 2.0),
                          mix(a.temperament, b.temperament, 0.05, 0.02, 0.6), (a.id, b.id),
                          max(a.generation, b.generation) + 1,
-                         mix(a.news_sensitivity, b.news_sensitivity, 0.15, -1, 1))
+                         mix(a.news_sensitivity, b.news_sensitivity, 0.15, -1, 1),
+                         mix(a.patience, b.patience, 0.3, 0, 5))
 
     def _fit_org(self, org: Organism, t: int) -> bool:
         # Rows whose every horizon target had resolved by t.
@@ -325,8 +348,11 @@ class EvolutionaryForecaster:
             return False
         X = self.X[np.ix_(rows, org.cols)]
         mu, sd = X.mean(axis=0), X.std(axis=0)
-        sd[sd == 0] = 1.0
-        Z = np.column_stack([(X - mu) / sd, np.ones(len(rows))])
+        # Near-constant over the window (e.g. news sentiment before it
+        # existed): float noise, not spread - dividing by it blew a later
+        # non-constant value up to forecasts in the billions.
+        sd[sd < 1e-8 * np.maximum(np.abs(mu), 1.0)] = 1.0
+        Z = np.column_stack([_standardize(X, mu, sd), np.ones(len(rows))])
         Y = self.Y[rows]
         reg = (10 ** org.log_alpha) * np.eye(Z.shape[1])
         reg[-1, -1] = 0.0  # don't shrink the intercept
@@ -342,7 +368,7 @@ class EvolutionaryForecaster:
         x = self.X[t, org.cols]
         if org.W is None or not np.isfinite(x).all():
             return np.zeros(len(HORIZONS))
-        return np.append((x - org.mu) / org.sd, 1.0) @ org.W
+        return np.append(_standardize(x, org.mu, org.sd), 1.0) @ org.W
 
     # -- training = replaying history ----------------------------------------
 
@@ -372,6 +398,8 @@ class EvolutionaryForecaster:
 
     def fit(self, df: pd.DataFrame) -> "EvolutionaryForecaster":
         self.version = STATE_VERSION
+        step = pd.Series(df.index).diff().median() if len(df) > 2 else pd.Timedelta(hours=1)
+        self.tax_per_candle = DAILY_TAX * (step / pd.Timedelta(days=1))
         self.rng = np.random.default_rng(self.seed)
         self.long_w = long_window(len(df))
         frame = df[[c for c in _FRAME_COLS if c in df.columns]].copy()
@@ -409,6 +437,12 @@ class EvolutionaryForecaster:
         self.alive = [self._random_organism(start) for _ in range(self.population_size)]
         for org in self.alive:
             self._fit_org(org, start)
+        # The population's fund: the vote trades START_MONEY too, next to
+        # simply buying ETH with it and holding.
+        self.fund = Organism(-1, start, 0, (), 0, 0.0, 1.0, 0.0)
+        self.buy_hold = START_MONEY
+        self.fund_start = self.index[start].isoformat()
+        self.fund_t0 = start
         self.births = 0  # the founders aren't counted as births
         # Typical |real move| per horizon, the yardstick for skill.
         valid_y = self.Y[feats_ok & self.y_ok & (np.arange(n) < start - H_MAX)]
@@ -456,10 +490,7 @@ class EvolutionaryForecaster:
                 p = preds.get(org.id)
                 if p is None:
                     continue
-                skill = (abs(y) - abs(p[j] - y)) / max(self.scale[j], 1e-9)
-                if skill < 0:
-                    skill -= MISS_PENALTY * skill * skill
-                skill = float(np.clip(skill, -MAX_PENALTY, 2))
+                skill = float(np.clip((abs(y) - abs(p[j] - y)) / max(self.scale[j], 1e-9), -10, 2))
                 org.recent.append((j, skill))
                 if org.worst is None or skill < org.worst[3]:
                     org.worst = (h, float(p[j]), float(y), skill)
@@ -489,41 +520,46 @@ class EvolutionaryForecaster:
             del self.pending[past]
             self.ens_pending.pop(past, None)
 
-        # 2. Energy and emotions.
+        # 2. Money: the position held since the last candle pays (or costs),
+        # living costs the daily tax (more when out of the market). Mood
+        # follows profitable vs losing candles.
+        move = math.exp(self.logc[t] - self.logc[t - 1]) - 1 if t > 0 else 0.0
         for org in self.alive:
-            org.energy -= METABOLISM
-            gained = lost = 0.0
-            if org.recent:
-                js = np.array([j for j, _ in org.recent])
-                skills = np.array([sk for _, sk in org.recent])
-                w = HORIZON_WEIGHTS[js]
-                skill = float((w * skills).sum() / w.sum())
-                gain = ENERGY_GAIN * skill
-                if len(skills) >= COMBO_MIN and (skills > 0).all():
-                    gain *= 1 + COMBO_BONUS
-                    org.combos = getattr(org, "combos", 0) + 1
-                org.energy += gain
-                gained, lost = max(gain, 0.0), max(-gain, 0.0)
-                org.gained += gained
-                org.lost_to_misses += lost
-                if skill > 0:
-                    org.wins += 1
-                else:
-                    org.losses += 1
-                # Mood follows the run of wins/losses: ~ recent win rate,
-                # remembered for about 1 / temperament candles.
-                org.mood += org.temperament * ((1.0 if skill > 0 else 0.0) - org.mood)
-                org.recent = []
-            org.trace.append((gained, lost))
+            before = org.energy
+            pnl = org.energy * org.position * move
+            tax = self.tax_per_candle * (IDLE_TAX_MULT if org.position == 0.0 else 1.0)
+            org.energy += pnl - tax
+            org.trading_pnl += pnl
+            org.tax_paid += tax
+            org.trace.append((pnl, org.fees_last, tax, before))
             del org.trace[:-DEATH_LOOKBACK]
-            if lost == 0.0 and gained == 0.0:
+            if org.position != 0.0:
+                won = pnl - org.fees_last > 0
+                org.wins += won
+                org.losses += not won
+                org.mood += org.temperament * ((1.0 if won else 0.0) - org.mood)
+            org.fees_last = 0.0
+            org.peak_money = max(org.peak_money, org.energy)
+            if org.recent:
+                if len(org.recent) >= COMBO_MIN and all(sk > 0 for _, sk in org.recent):
+                    org.combos += 1
+                org.recent = []
+            else:
                 org.worst = None
-            org.energy = min(org.energy, 3 * START_ENERGY)
+        if t > self.fund_t0:
+            self._fund_step(move)
 
         # 3. Death and birth.
-        dead = [o for o in self.alive if o.energy <= 0]
+        dead = [o for o in self.alive if o.energy < BANKRUPT]
+        if t % CULL_EVERY == 0:
+            adults = [o for o in self.alive if o.age(t) >= CULL_MIN_AGE and o.energy >= BANKRUPT]
+            if len(adults) > 1:
+                slowest = min(adults, key=lambda o: o.growth(t))
+                slowest.culled = True
+                dead.append(slowest)
         if dead:
-            self.alive = [o for o in self.alive if o.energy > 0]
+            dead_ids = {o.id for o in dead}
+            self.alive = [o for o in self.alive if o.id not in dead_ids]
             for o in dead:
                 self.deaths += 1
                 self.death_log.append({"id": o.id, "t": t, "age": o.age(t), "generation": o.generation})
@@ -554,18 +590,77 @@ class EvolutionaryForecaster:
         preds, weighted = {}, self._ensemble_members(t)
         for org in self.alive:
             preds[org.id] = self._raw(org, t) * org.boldness * self._feeling(org, t)
+            self._trade(org, preds[org.id], org.patience)
         self.pending[t] = preds
         self.ens_pending[t] = self._combine(weighted, preds)
+        self._trade(self.fund, self.ens_pending[t], 1.0)
         if t % 24 == 0 or t == len(self.logc) - 1:
             self.history.append(self._snapshot(t))
+
+    def _edge(self, pred: np.ndarray) -> float:
+        """Expected move per candle: each horizon's forecast per candle,
+        weighted toward the further ones."""
+        per_candle = pred / np.array(HORIZONS, dtype=float)
+        return float((HORIZON_WEIGHTS * per_candle).sum() / HORIZON_WEIGHTS.sum())
+
+    def _target_position(self, pred: np.ndarray, patience: float, current: float = 0.0) -> float:
+        """Long/short/out, as a fraction of its money.
+
+        Size: half the Kelly fraction (expected move per candle / its
+        variance) - Kelly is the bet that grows money fastest in the long
+        run (the goal); half of it, because the edge is only an estimate
+        and full Kelly on an overestimated edge goes broke. At most all of
+        its money (no leverage). Fees are paid only to enter,
+        change or leave a position, so it *enters* (or flips) only when the
+        move expected over its forecast horizon beats `patience` round trips
+        of fees; it *keeps* a position as long as the forecast still points
+        the same way; it leaves when the forecast turns."""
+        edge = self._edge(pred)
+        sigma = 1.2533 * max(self.scale[0], 1e-9)   # std of a candle's move (from its mean |move|)
+        size = float(np.clip(KELLY_FRACTION * edge / sigma ** 2, -1.0, 1.0))
+        if current != 0.0 and np.sign(edge) == np.sign(current):
+            return size                     # still right way round: hold (resized)
+        if abs(edge) * H_MAX > patience * 2 * FEE:
+            return size                     # worth paying to enter / flip
+        return 0.0                          # no position worth its fees
+
+    def _trade(self, acct: Organism, pred: np.ndarray, patience: float) -> None:
+        target = self._target_position(pred, patience, acct.position)
+        change = abs(target - acct.position)
+        # Small resizes of an open position aren't worth their fees.
+        if change == 0.0 or (change < MIN_REBALANCE and target != 0.0 and acct.position != 0.0):
+            return
+        fee = change * acct.energy * FEE
+        acct.energy -= fee
+        acct.fees_paid += fee
+        acct.fees_last += fee
+        acct.trades += 1
+        acct.position = target
+
+    def _fund_step(self, move: float) -> None:
+        f = self.fund
+        f.energy += f.energy * f.position * move
+        f.fees_last = 0.0
+        f.peak_money = max(f.peak_money, f.energy)
+        self.buy_hold *= 1 + move
 
     def _death_record(self, o: Organism, t: int) -> dict:
         """Everything about a death: who, when, where (the market at that
         moment) and why."""
-        lost = sum(l for _, l in o.trace)
-        last_loss = o.trace[-1][1] if o.trace else 0.0
-        living = METABOLISM * len(o.trace)
-        cause = "fatal_miss" if last_loss >= FATAL_MISS else "repeated_misses" if lost > living else "exhaustion"
+        trading_loss = -sum(p for p, _, _, _ in o.trace)
+        fees = sum(f for _, f, _, _ in o.trace)
+        taxes = sum(r for _, _, r, _ in o.trace)
+        worst_candle = max((-p / b for p, _, _, b in o.trace if b > 0), default=0.0)
+        if getattr(o, "culled", False):
+            cause = "outcompeted"
+        elif worst_candle >= BIG_LOSS:
+            cause = "big_loss"
+        elif fees >= max(trading_loss, taxes):
+            cause = "fees"
+        elif trading_loss >= taxes:
+            cause = "bad_trades"
+        else:
+            cause = "taxes"
         lr = np.diff(self.logc[max(0, t - 24): t + 1])
         lr_long = np.diff(self.logc[max(0, t - 24 * 30): t + 1])
         vol, vol_long = (float(np.std(lr)) if len(lr) > 1 else 0.0), (float(np.std(lr_long)) if len(lr_long) > 1 else 0.0)
@@ -574,10 +669,14 @@ class EvolutionaryForecaster:
             "id": o.id, "generation": o.generation, "parents": list(o.parents),
             "born": self.index[o.born_at].isoformat(), "died": self.index[t].isoformat(), "age": o.age(t),
             "cause": cause,
-            "last_candle_loss": round(last_loss, 2),
-            "lost_last_48": round(lost, 2), "living_cost_last_48": round(living, 2),
+            "money": round(o.energy, 2), "peak_money": round(o.peak_money, 2),
+            "growth_pct_per_100": round((math.exp(o.growth(t) * 100) - 1) * 100, 2),
+            "trades": o.trades, "fees_paid": round(o.fees_paid, 2), "trading_pnl": round(o.trading_pnl, 2),
+            "tax_paid": round(o.tax_paid, 2),
+            "last_48": {"trading_loss": round(trading_loss, 2), "fees": round(fees, 2), "taxes": round(taxes, 2),
+                        "worst_candle_pct": round(worst_candle * 100, 1)},
             "killing_prediction": None if worst is None else {
-                "h": worst[0], "predicted_pct": round((math.exp(worst[1]) - 1) * 100, 3),
+                "h": worst[0], "predicted_pct": round((math.exp(min(max(worst[1], -10.0), 10.0)) - 1) * 100, 3),
                 "actual_pct": round((math.exp(worst[2]) - 1) * 100, 3)},
             "price": round(float(math.exp(self.logc[t])), 2),
             "move_24_pct": round(float((math.exp(self.logc[t] - self.logc[max(0, t - 24)]) - 1) * 100), 2),
@@ -585,7 +684,6 @@ class EvolutionaryForecaster:
             "market_sentiment": round(float(self.S[t]), 2), "sentiment_source": str(self.S_source[t]) or None,
             "emotion": emotion_name(self._feeling(o, t)), "earned_mood": round(o.mood, 3),
             "wins": o.wins, "losses": o.losses, "combos": o.combos,
-            "lifetime_gained": round(o.gained, 1), "lifetime_lost_to_misses": round(o.lost_to_misses, 1),
             **o.genes(),
         }
 
@@ -600,6 +698,7 @@ class EvolutionaryForecaster:
             "window": round(float(np.mean([o.window for o in alive])), 1) if alive else None,
             "avg_generation": round(float(np.mean([o.generation for o in alive])), 1) if alive else None,
             "avg_energy": round(float(np.mean([o.energy for o in alive])), 1) if alive else None,
+            "patience": round(float(np.mean([o.patience for o in alive])), 3) if alive else None,
         }
 
     def _ensemble_members(self, t: int) -> list[Organism]:
@@ -611,7 +710,7 @@ class EvolutionaryForecaster:
     def _combine(members: list[Organism], preds: dict[int, np.ndarray]) -> np.ndarray:
         if not members:
             return np.zeros(len(HORIZONS))
-        w = np.array([max(o.energy, 1e-6) for o in members])
+        w = np.array([min(max(o.energy, 1e-6), VOTE_WEIGHT_CAP) for o in members])
         P = np.array([preds[o.id] for o in members])
         return (w[:, None] * P).sum(axis=0) / w.sum()
 
@@ -622,7 +721,10 @@ class EvolutionaryForecaster:
         return {"time": self.index[t].isoformat(), "alive": len(self.alive), "deaths": self.deaths,
                 "births": self.births, "mood": round(mood, 3),
                 "max_generation": max((o.generation for o in self.alive), default=0),
-                "price": round(float(math.exp(self.logc[t])), 2), **self._gene_snapshot()}
+                "price": round(float(math.exp(self.logc[t])), 2), **self._gene_snapshot(),
+                "fund": round(self.fund.energy, 2) if hasattr(self, "fund") else None,
+                "buy_hold": round(self.buy_hold, 2) if hasattr(self, "buy_hold") else None,
+                "richest": round(max((o.energy for o in self.alive), default=0.0), 2)}
 
     # -- forecasting ----------------------------------------------------------
 
@@ -644,7 +746,7 @@ class EvolutionaryForecaster:
         for org in self.alive:
             if X_last is not None:
                 x = X_last[org.cols]
-                raw = np.append((x - org.mu) / org.sd, 1.0) @ org.W if org.W is not None and np.isfinite(x).all() else np.zeros(len(HORIZONS))
+                raw = np.append(_standardize(x, org.mu, org.sd), 1.0) @ org.W if org.W is not None and np.isfinite(x).all() else np.zeros(len(HORIZONS))
             else:
                 raw = self._raw(org, t)
             preds[org.id] = raw * org.boldness * feeling(org)
@@ -678,6 +780,24 @@ class EvolutionaryForecaster:
             path.append((float(p), float(p + lo), float(p + hi)))
         return path, self.diagnostics(t, members)
 
+    def _money_summary(self, t: int) -> dict | None:
+        if not hasattr(self, "fund"):
+            return None
+        alive = self.alive
+        rich = max(alive, key=lambda o: o.energy) if alive else None
+        f = self.fund
+        return {
+            "start": START_MONEY, "currency": "EUR", "since": self.fund_start,
+            "fund": round(f.energy, 2), "fund_return_pct": round((f.energy / START_MONEY - 1) * 100, 2),
+            "fund_peak": round(f.peak_money, 2), "fund_trades": f.trades, "fund_fees": round(f.fees_paid, 2),
+            "fund_position": round(f.position, 2),
+            "buy_hold": round(self.buy_hold, 2), "buy_hold_return_pct": round((self.buy_hold / START_MONEY - 1) * 100, 2),
+            "total_alive_money": round(sum(o.energy for o in alive), 2),
+            "richest": None if rich is None else {"id": rich.id, "money": round(rich.energy, 2), "age": rich.age(t)},
+            "long": sum(o.position > 0 for o in alive), "short": sum(o.position < 0 for o in alive),
+            "out": sum(o.position == 0 for o in alive),
+        }
+
     def diagnostics(self, t: int, members: list[Organism] | None = None) -> dict:
         members = members if members is not None else self._ensemble_members(t)
         snap = self._snapshot(t)
@@ -686,6 +806,7 @@ class EvolutionaryForecaster:
         def org_json(o: Organism) -> dict:
             feel = self._feeling(o, t)
             return {"id": o.id, "age": o.age(t), "generation": o.generation, "energy": round(o.energy, 1),
+                    "money": round(o.energy, 2), "position": round(o.position, 2), "trades": o.trades,
                     "mood": round(feel, 3), "earned_mood": round(o.mood, 3), "news_effect": round(feel - o.mood, 3),
                     "emotion": emotion_name(feel), "wins": o.wins, "losses": o.losses,
                     "combos": getattr(o, "combos", 0),
@@ -736,6 +857,7 @@ class EvolutionaryForecaster:
             "gene_survival": survival,
             "market_sentiment": {"value": round(float(self.S[t]), 3), "source": str(self.S_source[t]) or None},
             "avg_news_sensitivity": round(float(np.mean(alive_sens)), 3) if alive_sens else None,
+            "money": self._money_summary(t),
             "band_calibrated": all(len(r) >= MIN_RESIDUALS for r in self.residuals),
             "leaders": [org_json(o) for o in members],
             "history": [{"time": h["time"], "mood": h["mood"]} for h in self.history[-60:]],
@@ -758,6 +880,10 @@ def _closed_rows(df: pd.DataFrame, now: datetime | None) -> pd.DataFrame:
     step = pd.Series(df.index).diff().median()
     now = pd.Timestamp(now or datetime.now(timezone.utc))
     return df.iloc[:-1] if df.index[-1] + step > now else df
+
+
+def _standardize(x: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    return np.clip((x - mu) / sd, -MAX_Z, MAX_Z)
 
 
 def state_path(key: str) -> Path:

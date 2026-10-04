@@ -21,6 +21,7 @@
     </a>
     <div class="topbar-actions">
       <a class="nav-link" href="/dashboard.html">📈 <span data-i18n="nav.dashboard">ETH Dashboard</span></a>
+      <a class="nav-link" href="/fund.html">💼 <span data-i18n="nav.fund">Strategy fund</span></a>
       <a class="nav-link" href="/evaluation.html">🎯 <span data-i18n="nav.evaluation">Evaluation</span></a>
       <a class="nav-link" href="/visual.html">🖼️ <span data-i18n="nav.visual">Visual history</span></a>
       <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
@@ -51,6 +52,14 @@
   </section>
 
   <section class="card">
+    <div class="card-header" data-i18n="pop.money.header">The money: 100 € each</div>
+    <p class="eval-hint" data-i18n="pop.money.hint">Every model starts with 100 € (virtual) and trades ETH with it: long, short or out, paying Binance's 0.1% fee on every trade and a daily tax of 0.05 € (0.15 € on days its money sits out of the market), so it must earn at least that. Money is its life: below 10 € it dies, and the slowest grower is replaced by a child of the rich. The fund is the population's vote trading 100 € the same way, next to simply buying ETH with 100 € and holding it.</p>
+    <div id="moneyTiles" class="box-stats pop-tiles"></div>
+    <div class="pop-chart-label"><span><span class="pop-key pop-key-fund"></span><span data-i18n="pop.money.fund">Population fund</span> · <span class="pop-key pop-key-hold"></span><span data-i18n="pop.money.hold">Buy &amp; hold</span></span><b id="moneyReadout"></b></div>
+    <div id="moneyChart" class="pop-chart pop-chart-tall"></div>
+  </section>
+
+  <section class="card">
     <div class="card-header" data-i18n="pop.timeline.header">Its life over time</div>
     <p class="eval-hint" data-i18n="pop.timeline.hint">Three views of the same time line: the ETH price it lived through, how many models died in each period, and the population's mood (dashed line = 50%, as good as "no change"). Hover to read values; drag or scroll to zoom, all three move together.</p>
     <div class="pop-chart-label"><span data-i18n="pop.timeline.price">ETH price</span><b id="priceReadout"></b></div>
@@ -66,12 +75,16 @@
       <div class="card-header" data-i18n="pop.causes.header">Why they died</div>
       <div id="causes" class="pop-bars"></div>
       <dl class="pop-cause-legend">
-        <dt data-i18n="pop.cause.fatal_miss">One fatal miss</dt>
-        <dd data-i18n="pop.causeHelp.fatal_miss">A single candle cost it 25+ energy: one prediction far from the real price.</dd>
-        <dt data-i18n="pop.cause.repeated_misses">Repeated misses</dt>
-        <dd data-i18n="pop.causeHelp.repeated_misses">Over its last 48 candles it lost more energy to wrong predictions than to living.</dd>
-        <dt data-i18n="pop.cause.exhaustion">Exhaustion</dt>
-        <dd data-i18n="pop.causeHelp.exhaustion">It wasn't badly wrong, it just never beat "no change" by enough to pay for living.</dd>
+        <dt data-i18n="pop.cause.outcompeted">Outcompeted</dt>
+        <dd data-i18n="pop.causeHelp.outcompeted">It was growing its money the slowest of the adults, so a child of the rich took its place.</dd>
+        <dt data-i18n="pop.cause.big_loss">One big loss</dt>
+        <dd data-i18n="pop.causeHelp.big_loss">A single candle took 25%+ of its money.</dd>
+        <dt data-i18n="pop.cause.fees">Fees</dt>
+        <dd data-i18n="pop.causeHelp.fees">It traded so often that fees cost it more than anything else.</dd>
+        <dt data-i18n="pop.cause.bad_trades">Bad trades</dt>
+        <dd data-i18n="pop.causeHelp.bad_trades">Its positions lost more than fees and taxes together.</dd>
+        <dt data-i18n="pop.cause.taxes">Taxes</dt>
+        <dd data-i18n="pop.causeHelp.taxes">It didn't earn its daily tax (charged 3x on days its money sat out of the market).</dd>
       </dl>
     </section>
     <section class="card">
@@ -95,7 +108,7 @@
 
   <section class="card">
     <div class="card-header" data-i18n="pop.generations.header">Generations</div>
-    <p class="eval-hint" data-i18n="pop.generations.hint">Every model that ever lived, grouped by generation. Click a row to see the deaths of that group's first generation.</p>
+    <p class="eval-hint" data-i18n="pop.generations.hint">Every model that ever lived, grouped by generation. Click a row to see that group's deaths.</p>
     <div class="eval-table-scroll">
       <table class="prediction-table eval-table">
         <thead><tr>
@@ -109,6 +122,7 @@
           <th class="num" data-i18n="pop.col.temperament">Temperament</th>
           <th class="num" data-i18n="pop.col.news">News sens.</th>
           <th class="num" data-i18n="pop.col.window">Memory</th>
+          <th class="num" data-i18n="pop.col.patience">Patience</th>
         </tr></thead>
         <tbody id="generationRows"></tbody>
       </table>
@@ -124,9 +138,11 @@
       <label><span data-i18n="pop.filter.cause">Cause</span>
         <select name="cause">
           <option value="" data-i18n="eval.filter.all">All</option>
-          <option value="fatal_miss" data-i18n="pop.cause.fatal_miss">One fatal miss</option>
-          <option value="repeated_misses" data-i18n="pop.cause.repeated_misses">Repeated misses</option>
-          <option value="exhaustion" data-i18n="pop.cause.exhaustion">Exhaustion</option>
+          <option value="outcompeted" data-i18n="pop.cause.outcompeted">outcompeted</option>
+          <option value="big_loss" data-i18n="pop.cause.big_loss">big_loss</option>
+          <option value="fees" data-i18n="pop.cause.fees">fees</option>
+          <option value="bad_trades" data-i18n="pop.cause.bad_trades">bad_trades</option>
+          <option value="taxes" data-i18n="pop.cause.taxes">Taxes</option>
         </select>
       </label>
       <label><span data-i18n="pop.filter.generation">Generation</span><input type="number" name="generation" min="0" step="1"></label>
@@ -139,6 +155,7 @@
       </label>
       <button type="reset" class="eval-btn" data-i18n="eval.filter.reset">Reset</button>
     </form>
+    <p id="activeFilter" class="pop-active-filter" hidden></p>
     <p class="eval-hint" data-i18n="pop.graveyard.hint">Click a row for the model's full story and family tree.</p>
     <div class="eval-table-scroll">
       <table class="prediction-table eval-table">
@@ -148,7 +165,8 @@
           <th class="num" data-i18n="pop.col.age">Lived</th>
           <th class="num" data-i18n="pop.col.gen">Gen.</th>
           <th data-i18n="pop.col.cause">Why</th>
-          <th data-i18n="pop.col.killer">The prediction that hurt most</th>
+          <th class="num" data-i18n="pop.col.money">Money left / peak</th>
+          <th class="num" data-i18n="pop.col.tradesFees">Trades / fees</th>
           <th data-i18n="pop.col.market">Market when it died</th>
           <th data-i18n="pop.col.mood">Mood</th>
           <th class="num" data-i18n="pop.col.record">Wins / losses / combos</th>
@@ -170,7 +188,9 @@
       <table class="prediction-table eval-table">
         <thead><tr>
           <th>#</th>
-          <th class="num" data-i18n="pop.col.energy">Energy</th>
+          <th class="num" data-i18n="pop.col.money2">Money</th>
+          <th data-i18n="pop.col.position">Position</th>
+          <th class="num" data-i18n="pop.col.tradesFees">Trades / fees</th>
           <th data-i18n="pop.col.mood">Mood</th>
           <th class="num" data-i18n="pop.col.age">Lived</th>
           <th class="num" data-i18n="pop.col.gen">Gen.</th>

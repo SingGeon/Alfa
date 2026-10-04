@@ -147,7 +147,7 @@ def fetch_binance(symbol: str, interval: str, total: int) -> list[dict]:
     import time
     from datetime import datetime, timezone
 
-    import requests
+    from data_collector.http_utils import get_json
 
     out: list = []
     end = None
@@ -155,7 +155,7 @@ def fetch_binance(symbol: str, interval: str, total: int) -> list[dict]:
         params = {"symbol": symbol, "interval": interval, "limit": 1000}
         if end:
             params["endTime"] = end
-        page = requests.get("https://api.binance.com/api/v3/klines", params=params, timeout=15).json()
+        page = get_json("https://api.binance.com/api/v3/klines", params=params, max_retries=6, timeout=30)
         if not page:
             break
         out = page + out

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strategy fund · ETH Price Predictor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/evaluation.css">
+<link rel="stylesheet" href="/population.css">
+<link rel="stylesheet" href="/fund.css">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <img class="brand-logo" src="/logo.png" alt="ETH Price Predictor">
+    </a>
+    <div class="topbar-actions">
+      <a class="nav-link" href="/dashboard.html">📈 <span data-i18n="nav.dashboard">ETH Dashboard</span></a>
+      <a class="nav-link" href="/population.html">🧬 <span data-i18n="nav.population">Model population</span></a>
+      <a class="nav-link" href="/evaluation.html">🎯 <span data-i18n="nav.evaluation">Evaluation</span></a>
+      <a class="nav-link" href="/visual.html">🖼️ <span data-i18n="nav.visual">Visual history</span></a>
+      <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
+        <button data-lang="en" type="button">EN</button>
+        <button data-lang="ro" type="button">RO</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="eval-intro pop-intro">
+    <h1 data-i18n="fund.title">💼 Strategy fund</h1>
+    <p class="eval-subtitle" data-i18n="fund.subtitle">Where ETH goes next can't be predicted (about 50% over nine years), but how much it will move can. This fund trades on that: a population of strategies, each mixing three pieces, evolves on the real history and the fund follows the best of them. Everything below was decided only from the past, candle by candle, with Binance's 0.1% fee on every trade.</p>
+    <div class="vis-tabs pop-intervals" id="intervalTabs" role="tablist">
+      <button type="button" data-interval="4h">4h</button>
+      <button type="button" data-interval="1d">1d</button>
+    </div>
+    <p class="eval-hint" data-i18n="fund.intervalsNote">Only on 4h and 1d: there it beat buy &amp; hold on years it had never seen. On 1h the fees ate the profit; 15m is still to be tested.</p>
+  </div>
+
+  <div id="errorBanner" class="error-banner" hidden></div>
+
+  <section class="card">
+    <div class="card-header" data-i18n="fund.now.header">Now</div>
+    <p id="nowNote" class="eval-hint"></p>
+    <div id="nowTiles" class="box-stats pop-tiles"></div>
+    <div class="box-stats-heading" data-i18n="fund.now.piecesHeading">Why: the three pieces of today's position</div>
+    <div id="pieces" class="pop-bars"></div>
+    <dl class="pop-cause-legend">
+      <dt data-i18n="fund.piece.core">Calm long</dt>
+      <dd data-i18n="fund.pieceHelp.core">Holds ETH, sized by the volatility forecast: less when the market is wild, more when it's calm.</dd>
+      <dt data-i18n="fund.piece.box">Box Breakout</dt>
+      <dd data-i18n="fund.pieceHelp.box">Follows the dashboard's Box Breakout trades: long on a breakout up, short on one down, which is what earns in the crashes.</dd>
+      <dt data-i18n="fund.piece.range">Range</dt>
+      <dd data-i18n="fund.pieceHelp.range">Buys low inside the forecast range and sells back at its middle, standing aside when the market trends too hard.</dd>
+    </dl>
+  </section>
+
+  <section class="card">
+    <div class="card-header" data-i18n="fund.money.header">The money: 100 € against buy &amp; hold</div>
+    <p id="moneyNote" class="eval-hint"></p>
+    <div id="moneyTiles" class="box-stats pop-tiles"></div>
+    <div class="pop-chart-label"><span><span class="pop-key pop-key-fund"></span><span data-i18n="fund.money.fund">Strategy fund</span> · <span class="pop-key pop-key-hold"></span><span data-i18n="pop.money.hold">Buy &amp; hold</span></span><b id="moneyReadout"></b></div>
+    <div id="moneyChart" class="pop-chart pop-chart-tall"></div>
+    <div class="pop-chart-label"><span data-i18n="fund.money.position">Position held (1 = all its money long, -1 = all short)</span><b id="positionReadout"></b></div>
+    <div id="positionChart" class="pop-chart"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-header" data-i18n="fund.years.header">Year by year</div>
+    <p class="eval-hint" data-i18n="fund.years.hint">It earns less than buy &amp; hold in the big bull years and loses less, or earns, in the bad ones. "Worst drop" is the largest fall from a peak within that year.</p>
+    <div class="eval-table-scroll">
+      <table class="prediction-table eval-table">
+        <thead><tr>
+          <th data-i18n="fund.col.year">Year</th>
+          <th class="num" data-i18n="fund.col.fund">Fund</th>
+          <th class="num" data-i18n="fund.col.fundDd">Worst drop</th>
+          <th class="num" data-i18n="fund.col.hold">Buy &amp; hold</th>
+          <th class="num" data-i18n="fund.col.holdDd">Worst drop</th>
+          <th class="num" data-i18n="fund.col.trades">Trades</th>
+        </tr></thead>
+        <tbody id="yearRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-header" data-i18n="fund.genes.header">What selection picked</div>
+    <p class="eval-hint" data-i18n="fund.genes.hint">Every month each strategy is scored on the years before (money after fees, minus a penalty for its worst drop); the weakest are replaced by children of the strongest, and the fund holds the average of the best four, in three independent populations. Nobody sets these by hand: this is how the best strategies' genes moved.</p>
+    <div id="geneSparks" class="pop-multiples"></div>
+    <div class="box-stats-heading" data-i18n="fund.genes.topHeading">The strategies the fund follows now</div>
+    <div class="eval-table-scroll">
+      <table class="prediction-table eval-table">
+        <thead><tr>
+          <th class="num" data-i18n="fund.col.core">Calm long</th>
+          <th class="num" data-i18n="fund.col.target">Risk target</th>
+          <th class="num" data-i18n="fund.col.box">Box</th>
+          <th class="num" data-i18n="fund.col.range">Range</th>
+          <th data-i18n="fund.col.short">Shorts</th>
+          <th class="num" data-i18n="fund.col.position">Position now</th>
+          <th class="num" data-i18n="fund.col.score">Past score</th>
+        </tr></thead>
+        <tbody id="strategyRows"></tbody>
+      </table>
+    </div>
+    <p id="settingsNote" class="eval-hint"></p>
+  </section>
+</div>
+
+<script src="/i18n.js"></script>
+<script src="/fund.js"></script>
+<script src="/topbar-scroll.js"></script>
+</body>
+</html>

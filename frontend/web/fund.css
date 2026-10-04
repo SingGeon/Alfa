@@ -1,0 +1,4 @@
+/* Strategy fund page. Builds on style.css, evaluation.css and population.css
+   (tiles, bars, charts, sparklines). */
+
+.pop-bar-track i.fund-neg { background: var(--down); }

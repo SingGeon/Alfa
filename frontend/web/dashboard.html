@@ -32,6 +32,7 @@
       <a class="nav-link" href="/history.html">🗓️ <span data-i18n="nav.history">Day history</span></a>
       <a class="nav-link" href="/visual.html">🖼️ <span data-i18n="nav.visual">Visual history</span></a>
       <a class="nav-link" href="/population.html">🧬 <span data-i18n="nav.population">Model population</span></a>
+      <a class="nav-link" href="/fund.html">💼 <span data-i18n="nav.fund">Strategy fund</span></a>
       <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
         <button data-lang="en" type="button">EN</button>
         <button data-lang="ro" type="button">RO</button>
@@ -236,6 +237,15 @@
     </div>
   </section>
 
+  <section class="card fund-card" id="fundCard" hidden>
+    <div class="evolution-head">
+      <span class="card-header" id="fundHeader" data-i18n="dashboard.fund.header">💼 Strategy fund</span>
+    </div>
+    <a class="nav-link evo-more" id="fundLink" href="/fund.html" data-i18n="dashboard.fund.more">Why it holds what it holds, year by year and what selection picked →</a>
+    <p class="evo-intro" id="fundIntro"></p>
+    <div id="fundStats" class="box-stats"></div>
+  </section>
+
   <section class="card evolution-card" id="evolutionCard" hidden>
     <div class="evolution-head">
       <span class="card-header" data-i18n="dashboard.evo.header">Model population</span>
@@ -243,7 +253,7 @@
     </div>
     <a class="nav-link evo-more" href="/population.html" data-i18n="dashboard.evo.fullHistory">See its whole history: every death, why, and what evolved →</a>
     <div id="evoSentiment" class="evo-sentiment"></div>
-    <p class="evo-intro" data-i18n="dashboard.evo.intro">The new model is a population of 24 small models. Each one lives only while its predictions beat "the price stays the same" on real candles: wins give it energy (more for being right further ahead, plus a combo bonus for being right on every horizon at once), mistakes take it away (the further off, the much more) and so does time, and at 0 it dies. The dead are replaced by children of the strongest. Each one has a mood (its recent win rate, swayed by the news as much as its news-sensitivity gene says): a frightened model barely moves its forecast, a confident one commits. The forecast on the chart is the vote of the 8 strongest adults, weighted by energy.</p>
+    <p class="evo-intro" data-i18n="dashboard.evo.intro">The new model is a population of 24 small models, each trading 100 € (virtual) on its own forecast. Money is its life: profits keep it alive, losses, Binance fees and rent drain it, below 10 € it dies, and the slowest grower is replaced by a child of the richest. Each one has a mood (its recent rate of profitable candles, swayed by the news as much as its news-sensitivity gene says): a frightened model barely moves its forecast, a confident one commits. The forecast on the chart is the vote of the 8 richest adults, weighted by their money.</p>
     <div id="evoStats" class="box-stats"></div>
     <div class="box-stats-heading" data-i18n="dashboard.evo.trackHeading">Real track record (votes on candles it hadn't seen yet)</div>
     <p id="evoTrackNote" class="evo-intro"></p>

@@ -286,3 +286,27 @@ def test_population_endpoints(client, synthetic_candles):
         assert org["organism"]["id"] == oid and org["organism"]["dead"] is True
     assert client.get("/api/evolution/deaths?interval=1h&cause=nope").status_code == 400
     assert client.get("/api/evolution/organism/999999?interval=1h").status_code == 404
+
+
+def test_strategy_fund_endpoint(client, monkeypatch, tmp_path):
+    from ml import strategy_fund
+
+    monkeypatch.setattr(strategy_fund, "STATE_DIR", tmp_path)
+    assert client.get("/api/strategy/fund?interval=1h").status_code == 400   # it doesn't trade there
+    assert client.get("/api/strategy/fund?interval=4h").status_code == 404   # not computed yet
+    (tmp_path / "ethereum_4h.json").write_text('{"interval": "4h", "now": {"position": 0.5}}')
+    resp = client.get("/api/strategy/fund?interval=4h")
+    assert resp.status_code == 200 and resp.json["now"]["position"] == 0.5
+
+
+def test_strategy_fund_is_stale_once_a_candle_closed(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+
+    from ml import strategy_fund
+
+    monkeypatch.setattr(strategy_fund, "STATE_DIR", tmp_path)
+    assert strategy_fund.is_stale("4h")
+    (tmp_path / "ethereum_4h.json").write_text('{"last_candle": "2026-10-02T08:00:00+00:00"}')
+    # The 08:00 candle closed at 12:00; the next one closes at 16:00.
+    assert not strategy_fund.is_stale("4h", datetime(2026, 10, 2, 15, 59, tzinfo=timezone.utc))
+    assert strategy_fund.is_stale("4h", datetime(2026, 10, 2, 16, 3, tzinfo=timezone.utc))

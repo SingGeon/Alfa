@@ -92,6 +92,15 @@ def pretrain(coin_id: str, symbol: str, interval: str, candles: int, compare: bo
         if g in surv:
             print(f" | {g} {surv[g]['avg_lifespan']:.0f} ({surv[g]['deaths']})", end="")
     print(f"\n  voters use: {d['input_usage']}", flush=True)
+    m = d["money"]
+    if m:
+        from collections import Counter
+        causes = Counter(x["cause"] for x in ev.graveyard)
+        print(f"  money (from {m['since'][:10]}, {m['start']:.0f} EUR each): fund {m['fund']:.2f} EUR "
+              f"({m['fund_return_pct']:+.1f}%, {m['fund_trades']} trades, {m['fund_fees']:.2f} EUR fees) | "
+              f"buy & hold {m['buy_hold']:.2f} EUR ({m['buy_hold_return_pct']:+.1f}%) | "
+              f"richest alive #{m['richest']['id']} {m['richest']['money']:.2f} EUR", flush=True)
+        print(f"  deaths by cause: {dict(causes)}", flush=True)
     return ev
 
 

@@ -10,8 +10,8 @@ import numpy as np
 
 from ml import evolution
 
-CAUSES = ("fatal_miss", "repeated_misses", "exhaustion")
-_NUMERIC_GENES = ("boldness", "temperament", "news_sensitivity", "window")
+CAUSES = ("outcompeted", "big_loss", "fees", "bad_trades", "taxes")
+_NUMERIC_GENES = ("boldness", "temperament", "news_sensitivity", "window", "patience")
 
 
 def current(key: str) -> evolution.EvolutionaryForecaster | None:
@@ -49,6 +49,7 @@ def report(ev: evolution.EvolutionaryForecaster, max_points: int = 400, max_gene
     for h in hist:
         timeline.append({
             "time": h["time"], "price": h.get("price"), "mood": h["mood"], "alive": h["alive"],
+            "fund": h.get("fund"), "buy_hold": h.get("buy_hold"), "richest": h.get("richest"),
             "deaths": h["deaths"] - prev_deaths, "avg_generation": h.get("avg_generation"),
             "shares": h.get("shares", {}), **{g: h.get(g) for g in _NUMERIC_GENES},
         })
@@ -96,6 +97,7 @@ def report(ev: evolution.EvolutionaryForecaster, max_points: int = 400, max_gene
             "market_sentiment": diag["market_sentiment"],
         },
         "track_record": diag["track_record"],
+        "money": diag["money"],
         "causes": causes,
         "gene_survival": diag["gene_survival"],
         "genes": list(ev.group_names),
@@ -114,17 +116,23 @@ def _alive_rows(ev: evolution.EvolutionaryForecaster) -> list[dict]:
         rows.append({"id": o.id, "generation": o.generation, "parents": list(o.parents),
                      "born": ev.index[o.born_at].isoformat(), "age": o.age(t), "energy": round(o.energy, 1),
                      "mood": round(feel, 3), "emotion": evolution.emotion_name(feel), "wins": o.wins,
-                     "losses": o.losses, "combos": o.combos, "voting": o.id in diag_leaders, **o.genes()})
+                     "losses": o.losses, "combos": o.combos, "voting": o.id in diag_leaders,
+                     "money": round(o.energy, 2), "peak_money": round(o.peak_money, 2), "position": round(o.position, 2),
+                     "trades": o.trades, "fees_paid": round(o.fees_paid, 2), "trading_pnl": round(o.trading_pnl, 2),
+                     **o.genes()})
     return rows
 
 
 def deaths_page(ev: evolution.EvolutionaryForecaster, page: int = 1, page_size: int = 50, cause: str | None = None,
-                generation: int | None = None, organism_id: int | None = None, order: str = "desc") -> dict:
+                generation: int | None = None, organism_id: int | None = None, order: str = "desc",
+                generation_to: int | None = None) -> dict:
+    """`generation` alone: that generation; with `generation_to`: the range."""
     rows = ev.graveyard
     if cause:
         rows = [d for d in rows if d["cause"] == cause]
     if generation is not None:
-        rows = [d for d in rows if d["generation"] == generation]
+        hi = generation if generation_to is None else generation_to
+        rows = [d for d in rows if generation <= d["generation"] <= hi]
     if organism_id is not None:
         rows = [d for d in rows if d["id"] == organism_id or organism_id in d["parents"]]
     if order == "desc":

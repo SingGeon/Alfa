@@ -56,6 +56,11 @@ const els = {
   sentimentContribution: document.getElementById("sentimentContribution"),
   recalibratedHint: document.getElementById("recalibratedHint"),
   evolutionCard: document.getElementById("evolutionCard"),
+  fundCard: document.getElementById("fundCard"),
+  fundHeader: document.getElementById("fundHeader"),
+  fundLink: document.getElementById("fundLink"),
+  fundIntro: document.getElementById("fundIntro"),
+  fundStats: document.getElementById("fundStats"),
   evoMood: document.getElementById("evoMood"),
   evoStats: document.getElementById("evoStats"),
   evoTrack: document.getElementById("evoTrack"),
@@ -1003,6 +1008,41 @@ async function loadBoxBreakout() {
   }
 }
 
+// -- Strategy fund (ml/strategy_fund.py) ------------------------------------
+// It only trades on 4h and 1d (where it beat buy & hold out of sample), so
+// any other chart interval shows the 4h fund.
+
+const FUND_INTERVALS = ["4h", "1d"];
+
+async function loadStrategyFund() {
+  const interval = FUND_INTERVALS.includes(state.interval) ? state.interval : "4h";
+  let r;
+  try {
+    r = await apiGet("/api/strategy/fund", { interval });
+  } catch {
+    els.fundCard.hidden = true;  // not computed yet: the background job makes it shortly after startup
+    return;
+  }
+  els.fundCard.hidden = false;
+  els.fundHeader.textContent = tf("dashboard.fund.headerInterval", { interval });
+  els.fundLink.href = `/fund.html?interval=${interval}`;
+  els.fundIntro.textContent = FUND_INTERVALS.includes(state.interval)
+    ? t("dashboard.fund.intro")
+    : tf("dashboard.fund.introOther", { interval: state.interval });
+  const p = r.now.position;
+  const pos = Math.abs(p) < 0.005 ? t("pop.money.out") : `${t(p > 0 ? "pop.money.long" : "pop.money.short")} ${Math.round(Math.abs(p) * 100)}%`;
+  const pct = (v) => `<span class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "+" : ""}${v.toFixed(1)}%</span>`;
+  const cell = (label, value) => `<div class="box-stat"><span>${label}</span><b>${value}</b></div>`;
+  const since = new Date(r.trading_from).getUTCFullYear();
+  els.fundStats.innerHTML = [
+    cell(t("fund.now.position"), pos),
+    cell(tf("dashboard.fund.since", { year: since }), `${r.whole_life.fund.money.toFixed(2)} € (${pct(r.whole_life.fund.ret_pct)})`),
+    cell(t("fund.money.test"), `${r.test.fund.money.toFixed(2)} € (${pct(r.test.fund.ret_pct)})`),
+    cell(t("fund.money.testHold"), `${r.test.buy_hold.money.toFixed(2)} € (${pct(r.test.buy_hold.ret_pct)})`),
+    cell(t("fund.money.dd"), `${Math.round(r.whole_life.fund.max_dd_pct)}% · ${tf("fund.money.ddHold", { dd: Math.round(r.whole_life.buy_hold.max_dd_pct) })}`),
+  ].join("");
+}
+
 // -- Evolving model population ("tuned", ml/evolution.py) -----------------
 
 const EMOTION_EMOJI = { fear: "😨", caution: "🤔", calm: "😐", confidence: "🙂", euphoria: "🤩" };
@@ -1041,6 +1081,10 @@ function renderEvolution(evo) {
     cell(t("dashboard.evo.deathsRecent"), evo.deaths_last_100),
     cell(t("dashboard.evo.lifespan"), evo.avg_lifespan_of_dead == null ? "—" : tf("dashboard.box.candles", { n: Math.round(evo.avg_lifespan_of_dead) })),
     cell(t("dashboard.evo.band"), t(evo.band_calibrated ? "dashboard.evo.bandYes" : "dashboard.evo.bandNo")),
+    ...(evo.money ? [
+      cell(t("pop.money.fund"), `${evo.money.fund.toFixed(2)} € (${evo.money.fund_return_pct > 0 ? "+" : ""}${evo.money.fund_return_pct.toFixed(1)}%)`),
+      cell(t("pop.money.hold"), `${evo.money.buy_hold.toFixed(2)} € (${evo.money.buy_hold_return_pct > 0 ? "+" : ""}${evo.money.buy_hold_return_pct.toFixed(1)}%)`),
+    ] : []),
   ].join("");
 
   // Skill: 1 - (vote's error / "no change" error); above 0 = it beat a flat line.
@@ -1914,7 +1958,7 @@ async function loadAll() {
   await Promise.all([
     loadCurrentPrice(), loadChart(), loadOutlook(), loadSummary(), loadNews(), loadGas(),
     loadPinnedTicker(), accuracyPanelSklearn.load(), loadL2Panel(), loadBacktestHint(), loadPatterns(),
-    loadBoxBreakout(), loadSignalAccuracy(),
+    loadBoxBreakout(), loadSignalAccuracy(), loadStrategyFund(),
   ]);
   els.updated.textContent = tf("dashboard.updated.template", { time: new Date().toLocaleTimeString("en-US") });
 }

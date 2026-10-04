@@ -18,6 +18,7 @@ from data_collector.jobs import (
     run_all_once,
 )
 from evaluation import jobs as evaluation_jobs
+from ml.strategy_fund import refresh_all as refresh_strategy_fund
 from scout.scanner import run_scout_scan
 
 app = create_app()
@@ -50,6 +51,15 @@ def _run_scout_scan_subprocess() -> None:
     ctx.Process(target=run_scout_scan, daemon=True, name="scout-scan-proc").start()
 
 
+def _refresh_strategy_fund_subprocess() -> None:
+    """Recompute the strategy fund (ml/strategy_fund.py) for every interval a
+    new candle has closed on - ~1.5 min of CPU on 4h, so in its own process
+    for the same GIL reason as the Scout scan above. Cheap when nothing is
+    stale: it only reads the saved reports' last candle."""
+    ctx = multiprocessing.get_context("spawn")
+    ctx.Process(target=refresh_strategy_fund, daemon=True, name="strategy-fund-proc").start()
+
+
 def _warm_up_loop() -> None:
     while True:
         try:
@@ -76,6 +86,7 @@ def _start_market_data_scheduler() -> None:
     logger.info("Seeding market data/news on startup...")
     run_all_once()
     _run_scout_scan_subprocess()
+    _refresh_strategy_fund_subprocess()
 
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(collect_market_data_job, "interval", minutes=config.COLLECT_INTERVAL_MINUTES, id="collect_market_data")
@@ -91,6 +102,9 @@ def _start_market_data_scheduler() -> None:
         kwargs={"interval": "1h", "steps": 24, "max_candidates": 5},
     )
     scheduler.add_job(_run_scout_scan_subprocess, "interval", minutes=config.SCOUT_INTERVAL_MINUTES, id="scout_scan")
+    # A 4h candle closes at 00/04/08..., a daily one at 00:00 UTC: check a
+    # few minutes after every hour, recompute only what's behind.
+    scheduler.add_job(_refresh_strategy_fund_subprocess, "cron", minute=3, id="strategy_fund")
     # Prediction evaluation: real prices every minute, daily overview at 00:05 UTC.
     evaluation_jobs.register_jobs(scheduler)
     scheduler.start()

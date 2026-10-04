@@ -30,7 +30,7 @@ from api.services import (
 )
 from data_collector.market_data import SUPPORTED_INTERVALS, MarketDataError, get_current_price
 from database import repository
-from ml import box_breakout, evolution_report, pattern_recognition
+from ml import box_breakout, evolution_report, pattern_recognition, strategy_fund
 
 logger = logging.getLogger(__name__)
 
@@ -500,6 +500,7 @@ def evolution_population_deaths():
         page = int(request.args.get("page", 1))
         page_size = int(request.args.get("page_size", 50))
         generation = int(request.args["generation"]) if request.args.get("generation") else None
+        generation_to = int(request.args["generation_to"]) if request.args.get("generation_to") else None
         organism_id = int(request.args["organism"]) if request.args.get("organism") else None
     except ValueError:
         return jsonify({"error": "page, page_size, generation and organism must be integers"}), 400
@@ -507,7 +508,7 @@ def evolution_population_deaths():
     if cause and cause not in evolution_report.CAUSES:
         return jsonify({"error": f"cause must be one of {list(evolution_report.CAUSES)}"}), 400
     order = "asc" if request.args.get("order") == "asc" else "desc"
-    return jsonify(evolution_report.deaths_page(ev, page, page_size, cause, generation, organism_id, order))
+    return jsonify(evolution_report.deaths_page(ev, page, page_size, cause, generation, organism_id, order, generation_to))
 
 
 @api_bp.get("/evolution/organism/<int:organism_id>")
@@ -520,6 +521,23 @@ def evolution_population_organism(organism_id: int):
     if found is None:
         return jsonify({"error": f"No organism #{organism_id} in this population"}), 404
     return jsonify(found)
+
+
+@api_bp.get("/strategy/fund")
+def strategy_fund_report():
+    """The evolving strategy fund (ml/strategy_fund.py): its position now and
+    why, its money against buy & hold since 2020 and on TEST (2023 on), year
+    by year, and the genes selection picked. Read from the report the
+    background job saves; computing it takes ~1.5 min."""
+    interval = request.args.get("interval", "4h")
+    if interval not in strategy_fund.FUND_INTERVALS:
+        return jsonify({"error": f"The strategy fund runs on {list(strategy_fund.FUND_INTERVALS)} only: on 1h the "
+                                 f"fees ate it, 15m is still to be tested."}), 400
+    rep = strategy_fund.load(interval)
+    if rep is None:
+        return jsonify({"error": f"No strategy fund report for {interval} yet: it is computed in the background "
+                                 f"shortly after startup, or run `python -m ml.strategy_fund --interval {interval}`."}), 404
+    return jsonify(rep)
 
 
 @api_bp.get("/summary")
