@@ -2,7 +2,7 @@ import clsx from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router";
 import { useQuery } from "@tanstack/react-query";
-import { House, LineChart, Menu, Radar, Target, X, type LucideIcon } from "lucide-react";
+import { Dna, House, LineChart, Menu, Radar, Target, Wallet, X, type LucideIcon } from "lucide-react";
 import { apiGet, type CurrentPrice } from "../lib/api";
 import { fmtMoney } from "../lib/format";
 import { useI18n, type Lang } from "../i18n";
@@ -28,6 +28,8 @@ const NAV: { to: string; key: string; match: string[]; Icon: LucideIcon; exact?:
   { to: "/dashboard", key: "nav.dashboard", match: ["/dashboard"], Icon: LineChart },
   { to: "/scout", key: "nav.scout", match: ["/scout", "/asset"], Icon: Radar },
   { to: "/evaluation", key: "nav.evaluation", match: ["/evaluation", "/history", "/visual"], Icon: Target },
+  { to: "/population", key: "nav.population", match: ["/population"], Icon: Dna },
+  { to: "/fund", key: "nav.fund", match: ["/fund"], Icon: Wallet },
 ];
 
 function LangToggle() {

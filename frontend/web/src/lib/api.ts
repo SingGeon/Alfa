@@ -246,6 +246,278 @@ export interface EvalDayDetail {
   pdf: boolean;
 }
 
+// ---- evolution (ml/evolution.py, the "tuned" population)
+
+export interface AliveOrganism {
+  id: number;
+  age: number;
+  generation: number;
+  born: string;
+  money: number;
+  peak_money: number;
+  position: number;
+  trades: number;
+  fees_paid: number;
+  trading_pnl: number;
+  wins: number;
+  losses: number;
+  combos: number;
+  emotion: string;
+  mood: number;
+  energy: number;
+  voting: boolean;
+  inputs: string[];
+  parents: number[];
+  boldness: number;
+  temperament: number;
+  news_sensitivity: number;
+  window: number;
+  patience: number;
+  ridge_alpha: number;
+}
+
+export interface DeathRow {
+  id: number;
+  born: string;
+  died: string;
+  age: number;
+  generation: number;
+  cause: string;
+  money: number;
+  peak_money: number;
+  trades: number;
+  fees_paid: number;
+  tax_paid: number;
+  wins: number;
+  losses: number;
+  combos: number;
+  inputs: string[];
+  parents: number[];
+  emotion: string;
+  earned_mood: number;
+  price: number;
+  move_24_pct: number;
+  volatility_vs_month: number | null;
+  market_sentiment: number | null;
+  sentiment_source: string | null;
+  growth_pct_per_100: number;
+  killing_prediction: { h: number; predicted_pct: number; actual_pct: number } | null;
+  last_48: { fees: number; taxes: number; trading_loss: number; worst_candle_pct: number } | null;
+  boldness: number;
+  temperament: number;
+  news_sensitivity: number;
+  window: number;
+  patience: number;
+  ridge_alpha: number;
+}
+export interface EvolutionDeathsResponse {
+  page: number;
+  page_size: number;
+  pages: number;
+  total: number;
+  rows: DeathRow[];
+}
+
+export interface AncestorNode {
+  id: number;
+  level: number;
+  generation: number;
+  age: number;
+  dead: boolean;
+  cause?: string;
+  inputs: string[];
+  known: boolean;
+}
+export interface OrganismDetail extends AliveOrganism {
+  dead: boolean;
+  cause?: string;
+  died?: string;
+  price?: number;
+  move_24_pct?: number;
+}
+export interface EvolutionOrganismResponse {
+  organism: OrganismDetail;
+  ancestors: AncestorNode[];
+  children: { id: number; generation: number; age: number; dead: boolean }[];
+}
+
+export interface EvolutionTimelinePoint {
+  time: string;
+  price: number | null;
+  deaths: number;
+  alive: number;
+  mood: number;
+  fund: number | null;
+  buy_hold: number | null;
+  richest: number | null;
+  boldness: number;
+  temperament: number;
+  news_sensitivity: number;
+  window: number;
+  patience: number;
+  avg_generation: number;
+  shares: Record<string, number>;
+}
+export interface EvolutionCause {
+  cause: string;
+  deaths: number;
+  share_pct: number;
+  avg_age: number | null;
+}
+export interface EvolutionGeneration {
+  from: number;
+  to: number;
+  organisms: number;
+  alive: number;
+  avg_lifespan: number | null;
+  causes: Record<string, number>;
+  input_shares: Record<string, number>;
+  boldness: number;
+  temperament: number;
+  news_sensitivity: number;
+  window: number;
+  patience: number;
+}
+export interface TrackRecordRow {
+  h: number;
+  n: number;
+  skill: number | null;
+  direction_pct: number | null;
+  recent_n: number;
+  recent_skill: number | null;
+  recent_direction_pct: number | null;
+}
+export interface EvolutionSummary {
+  alive: number;
+  births: number;
+  deaths: number;
+  max_generation: number;
+  avg_lifespan_of_dead: number | null;
+  oldest_alive: number;
+  emotion: string;
+  mood: number;
+  lived_from: string;
+  lived_to: string;
+  candles_lived: number;
+  market_sentiment: { source: string; value: number } | null;
+}
+export interface EvolutionMoney {
+  currency: string;
+  start: number;
+  since: string;
+  fund: number;
+  fund_return_pct: number;
+  fund_peak: number;
+  fund_trades: number;
+  fund_fees: number;
+  fund_position: number;
+  buy_hold: number;
+  buy_hold_return_pct: number;
+  richest: { id: number; age: number; money: number } | null;
+  total_alive_money: number;
+  long: number;
+  short: number;
+  out: number;
+}
+export interface EvolutionReport {
+  interval: string;
+  genes: string[];
+  summary: EvolutionSummary;
+  money: EvolutionMoney | null;
+  timeline: EvolutionTimelinePoint[];
+  causes: EvolutionCause[];
+  gene_survival: Record<string, { avg_lifespan: number; deaths: number }>;
+  generations: EvolutionGeneration[];
+  track_record: TrackRecordRow[];
+  alive: AliveOrganism[];
+}
+
+// ---- strategy fund (ml/strategy_fund.py)
+
+export interface FundNow {
+  position: number;
+  box: number;
+  pieces: { core: number; box: number; range: number };
+  vol_forecast_annual_pct: number | null;
+  next_reselection: string;
+}
+export interface FundMoneyStat {
+  money: number;
+  ret_pct: number;
+  cagr_pct: number;
+  max_dd_pct: number;
+  sharpe: number;
+  trades: number;
+  fees: number;
+  exposure_pct: number;
+}
+export interface FundPeriod {
+  fund: FundMoneyStat;
+  buy_hold: FundMoneyStat;
+}
+export interface FundYear {
+  year: number;
+  fund_pct: number;
+  fund_dd: number;
+  buy_hold_pct: number;
+  buy_hold_dd: number;
+  trades: number;
+}
+export interface FundCurvePoint {
+  time: string;
+  fund: number;
+  buy_hold: number;
+  position: number;
+}
+export interface FundGenePoint {
+  time: string;
+  core: number;
+  target: number;
+  box_w: number;
+  range_w: number;
+  long_short: number;
+}
+export interface FundStrategyGenes {
+  core: number;
+  target: number;
+  box_w: number;
+  range_w: number;
+  long_short: boolean;
+  [key: string]: number | boolean;
+}
+export interface FundStrategy {
+  genes: FundStrategyGenes;
+  now: { core: number; box: number; range: number };
+  position: number;
+  score: number;
+}
+export interface FundSettings {
+  population: number;
+  top_k: number;
+  replace: number;
+  reselect_days: number;
+  lookback_days: number;
+  seeds: number[];
+  fee: number;
+  dd_penalty: number;
+}
+export interface FundReport {
+  interval: string;
+  price: number;
+  last_candle: string;
+  computed_at: string;
+  trading_from: string;
+  test_from: string;
+  now: FundNow;
+  whole_life: FundPeriod;
+  test: FundPeriod;
+  years: FundYear[];
+  curve: FundCurvePoint[];
+  genes_over_time: FundGenePoint[];
+  strategies: FundStrategy[];
+  settings: FundSettings;
+}
+
 // ---- pins
 
 export async function addPin(pin: Pin): Promise<void> {

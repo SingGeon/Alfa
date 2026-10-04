@@ -9,6 +9,8 @@ import {
   type AccuracyResponse,
   type Candle,
   type CurrentPrice,
+  type EvolutionReport,
+  type FundReport,
   type L2Chain,
   type NewsItem,
   type OutlookResponse,
@@ -125,6 +127,17 @@ export default function Dashboard() {
     retry: false,
   });
   const l2 = useQuery({ queryKey: ["l2"], queryFn: () => apiGet<{ chains: L2Chain[] }>("/api/l2"), refetchInterval: 300_000 });
+  const evolution = useQuery({
+    queryKey: ["evolution-report", interval],
+    queryFn: () => apiGet<EvolutionReport>("/api/evolution/report", { interval }),
+    retry: false,
+  });
+  const fundInterval = interval === "4h" || interval === "1d" ? interval : "4h";
+  const fund = useQuery({
+    queryKey: ["strategy-fund", fundInterval],
+    queryFn: () => apiGet<FundReport>("/api/strategy/fund", { interval: fundInterval }),
+    retry: false,
+  });
   const backtest = useQuery({ queryKey: ["accuracy-hint", interval], queryFn: () => apiGet<AccuracyResponse>("/api/predict/accuracy", { interval, limit: 100 }), refetchInterval: REFRESH });
   const signalAcc = useQuery({ queryKey: ["signal-accuracy"], queryFn: () => apiGet<SignalAccuracyResponse>("/api/signal/accuracy", { interval: "1h" }), refetchInterval: 60_000 });
   const patterns = useQuery({
@@ -517,6 +530,14 @@ export default function Dashboard() {
         <AccuracyPanel className="lg:col-span-8" />
         <SignalAccuracyPanel data={signalAcc.data} error={!!signalAcc.error} className="lg:col-span-4" />
       </div>
+
+      {/* ------------------------------------------------ evolution + fund */}
+      {(evolution.data || fund.data) && (
+        <div className="mt-4 grid gap-4 lg:grid-cols-12">
+          {evolution.data && <EvolutionCard data={evolution.data} className="lg:col-span-7" />}
+          {fund.data && <FundCard data={fund.data} chartInterval={interval} className="lg:col-span-5" />}
+        </div>
+      )}
 
       {/* ------------------------------------------------ L2 */}
       <Panel className="mt-4">
@@ -913,6 +934,120 @@ function L2Grid({ chains }: { chains: L2Chain[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+// =================================================================== evolution / fund cards
+
+const EMOTION_EMOJI: Record<string, string> = { fear: "😨", caution: "🤔", calm: "😐", confidence: "🙂", euphoria: "🤩" };
+
+function EvolutionCard({ data, className }: { data: EvolutionReport; className?: string }) {
+  const { t } = useI18n();
+  const s = data.summary;
+  const leaders = [...data.alive].filter((o) => o.voting).sort((a, b) => b.money - a.money).slice(0, 6);
+  const latestShares = data.timeline.at(-1)?.shares ?? {};
+  const topGenes = Object.entries(latestShares).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxEnergy = Math.max(...leaders.map((o) => o.money), 1);
+  return (
+    <Panel className={clsx("overflow-hidden", className)}>
+      <div className="p-4 sm:p-5">
+        <div className="flex items-center justify-between gap-3">
+          <PanelHeader title={t("dashboard.evo.header")} />
+          <Badge tone="accent">{EMOTION_EMOJI[s.emotion] ?? ""} {t(`dashboard.evo.emotion.${s.emotion}`)}</Badge>
+        </div>
+        <Link to="/population" className="mt-2 inline-flex items-center gap-1.5 text-[13px] text-dim hover:text-bone">
+          {t("dashboard.evo.fullHistory")} <ArrowRight className="size-3.5" />
+        </Link>
+        <p className="mt-3 max-w-prose text-[12.5px] leading-relaxed text-faint">{t("dashboard.evo.intro")}</p>
+      </div>
+      <div className="grid grid-cols-2 gap-px border-t border-line bg-line sm:grid-cols-3">
+        {[
+          [t("dashboard.evo.alive"), s.alive],
+          [t("dashboard.evo.generation"), s.max_generation],
+          [t("dashboard.evo.births"), s.births],
+          [t("dashboard.evo.deaths"), s.deaths],
+          [t("dashboard.evo.lifespan"), s.avg_lifespan_of_dead == null ? "—" : t("dashboard.box.candles", { n: Math.round(s.avg_lifespan_of_dead) })],
+        ].map(([label, value]) => (
+          <div key={label as string} className="bg-panel/90 px-4 py-3">
+            <div className="text-[11px] text-faint">{label}</div>
+            <div className="num mt-1 text-[15px] font-medium text-bone">{value}</div>
+          </div>
+        ))}
+      </div>
+      {!!leaders.length && (
+        <div className="border-t border-line p-4 sm:p-5">
+          <div className="eyebrow mb-3">{t("dashboard.evo.leaders")}</div>
+          <div className="space-y-2">
+            {leaders.map((o) => (
+              <div key={o.id} className="flex items-center gap-2.5 text-[12.5px]">
+                <span className="num w-8 shrink-0 text-faint">#{o.id}</span>
+                <span className="w-7 shrink-0 text-center">{EMOTION_EMOJI[o.emotion] ?? ""}</span>
+                <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-press"><span className="block h-full rounded-full bg-accent/70" style={{ width: `${Math.max(4, (o.money / maxEnergy) * 100)}%` }} /></span>
+                <span className="num w-16 shrink-0 text-right text-bone">{o.money.toFixed(1)} €</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {!!topGenes.length && (
+        <div className="border-t border-line p-4 sm:p-5">
+          <div className="eyebrow mb-3">{t("dashboard.evo.usage")}</div>
+          <div className="space-y-2">
+            {topGenes.map(([g, share]) => (
+              <div key={g} className="flex items-center gap-2.5 text-[12.5px]">
+                <span className="w-32 shrink-0 truncate text-dim">{t(`dashboard.evo.input.${g}`)}</span>
+                <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-press"><span className="block h-full rounded-full bg-sky/70" style={{ width: `${share * 100}%` }} /></span>
+                <b className="num w-10 shrink-0 text-right text-bone">{Math.round(share * 100)}%</b>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function FundCard({ data, chartInterval, className }: { data: FundReport; chartInterval: Interval; className?: string }) {
+  const { t } = useI18n();
+  const w = data.whole_life, te = data.test, n = data.now;
+  const sameInterval = chartInterval === data.interval;
+  const pos = Math.abs(n.position) < 0.005 ? t("pop.money.out") : `${t(n.position > 0 ? "pop.money.long" : "pop.money.short")} ${Math.round(Math.abs(n.position) * 100)}%`;
+  const since = new Date(data.trading_from).getUTCFullYear();
+  const tone = (v: number) => (v > 0 ? "text-up" : v < 0 ? "text-down" : "text-dim");
+  return (
+    <Panel className={clsx("overflow-hidden", className)}>
+      <div className="p-4 sm:p-5">
+        <PanelHeader title={t("dashboard.fund.headerInterval", { interval: data.interval })} />
+        <Link to="/fund" className="mt-2 inline-flex items-center gap-1.5 text-[13px] text-dim hover:text-bone">
+          {t("dashboard.fund.more")} <ArrowRight className="size-3.5" />
+        </Link>
+        <p className="mt-3 max-w-prose text-[12.5px] leading-relaxed text-faint">
+          {sameInterval ? t("dashboard.fund.intro") : t("dashboard.fund.introOther", { interval: chartInterval })}
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-px border-t border-line bg-line">
+        <div className="bg-panel/90 px-4 py-3">
+          <div className="text-[11px] text-faint">{t("fund.now.position")}</div>
+          <div className="num mt-1 text-[15px] font-medium text-bone">{pos}</div>
+        </div>
+        <div className="bg-panel/90 px-4 py-3">
+          <div className="text-[11px] text-faint">{t("dashboard.fund.since", { year: since })}</div>
+          <div className="num mt-1 text-[15px] font-medium text-bone">{w.fund.money.toFixed(2)} € <span className={clsx("text-xs", tone(w.fund.ret_pct))}>{w.fund.ret_pct > 0 ? "+" : ""}{w.fund.ret_pct.toFixed(1)}%</span></div>
+        </div>
+        <div className="bg-panel/90 px-4 py-3">
+          <div className="text-[11px] text-faint">{t("fund.money.test")}</div>
+          <div className="num mt-1 text-[15px] font-medium text-bone">{te.fund.money.toFixed(2)} € <span className={clsx("text-xs", tone(te.fund.ret_pct))}>{te.fund.ret_pct > 0 ? "+" : ""}{te.fund.ret_pct.toFixed(1)}%</span></div>
+        </div>
+        <div className="bg-panel/90 px-4 py-3">
+          <div className="text-[11px] text-faint">{t("fund.money.testHold")}</div>
+          <div className="num mt-1 text-[15px] font-medium text-bone">{te.buy_hold.money.toFixed(2)} € <span className={clsx("text-xs", tone(te.buy_hold.ret_pct))}>{te.buy_hold.ret_pct > 0 ? "+" : ""}{te.buy_hold.ret_pct.toFixed(1)}%</span></div>
+        </div>
+      </div>
+      <div className="border-t border-line bg-panel/90 px-4 py-3">
+        <div className="text-[11px] text-faint">{t("fund.money.dd")}</div>
+        <div className="num mt-1 text-[15px] font-medium text-bone">{Math.round(w.fund.max_dd_pct)}% <span className="text-xs text-faint">{t("fund.money.ddHold", { dd: Math.round(w.buy_hold.max_dd_pct) })}</span></div>
+      </div>
+    </Panel>
   );
 }
 

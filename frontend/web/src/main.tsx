@@ -17,6 +17,8 @@ const AssetDetail = lazy(() => import("./pages/AssetDetail"));
 const Evaluation = lazy(() => import("./pages/eval/Evaluation"));
 const History = lazy(() => import("./pages/eval/History"));
 const Visual = lazy(() => import("./pages/eval/Visual"));
+const Population = lazy(() => import("./pages/Population"));
+const Fund = lazy(() => import("./pages/Fund"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -74,6 +76,8 @@ const router = createBrowserRouter([
       { path: "/evaluation", element: <Lazy><Evaluation /></Lazy> },
       { path: "/history", element: <Lazy><History /></Lazy> },
       { path: "/visual", element: <Lazy><Visual /></Lazy> },
+      { path: "/population", element: <Lazy><Population /></Lazy> },
+      { path: "/fund", element: <Lazy><Fund /></Lazy> },
       { path: "/index.html", element: <Navigate to="/" replace /> },
       { path: "/dashboard.html", element: <LegacyRedirect to="/dashboard" /> },
       { path: "/scout.html", element: <LegacyRedirect to="/scout" /> },
@@ -81,6 +85,8 @@ const router = createBrowserRouter([
       { path: "/evaluation.html", element: <LegacyRedirect to="/evaluation" /> },
       { path: "/history.html", element: <LegacyRedirect to="/history" /> },
       { path: "/visual.html", element: <LegacyRedirect to="/visual" /> },
+      { path: "/population.html", element: <LegacyRedirect to="/population" /> },
+      { path: "/fund.html", element: <LegacyRedirect to="/fund" /> },
       { path: "*", element: <NotFound /> },
     ],
   },
