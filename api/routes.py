@@ -312,7 +312,7 @@ def scout_price():
 
 @api_bp.get("/scout/pins")
 def scout_pins():
-    """Bookmarked assets (see scout.html's "Fixate" tab) - independent of
+    """Bookmarked assets (see the Scout page's "Pinned" filter) - independent of
     whatever the latest scan happens to contain right now.
     """
     asset_type = request.args.get("asset_type")

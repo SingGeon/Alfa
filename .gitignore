@@ -15,3 +15,7 @@ data/
 .ipynb_checkpoints/
 Untitled.ipynb
 untitled.py
+
+# Frontend (React app in frontend/web, built into frontend/dist)
+node_modules/
+frontend/dist/

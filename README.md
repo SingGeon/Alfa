@@ -30,6 +30,7 @@ Combines:
 - [Structure](#structure)
 - [Installation](#installation)
 - [Running](#running)
+- [Frontend](#frontend)
 - [ETH Dashboard](#eth-dashboard)
   - [Box Breakout strategy](#box-breakout-strategy)
 - [Scout AI](#scout-ai)
@@ -226,18 +227,12 @@ api/
   services.py                   # orchestrates candles + sentiment + BTC + TVL + model -> prediction
 
 frontend/
-  web/
-    index.html / landing.css / landing.js       # landing page (hero, how it works, features)
-    dashboard.html / style.css / app.js         # ETH dashboard
-    scout.html / scout.css / scout.js           # Scout AI list (filters, pin, mega-cap badge)
-    detail.html / detail.css / detail.js        # per-asset detail (chart, prediction, narrative, live price)
-    chart-utils.js                              # shared chart helper (app.js + detail.js)
-    i18n.js                                     # shared EN/RO i18n runtime (language toggle)
-    evaluation.html / evaluation.css / .js      # prediction evaluation table
-    history.html / history.js                   # day history (daily overviews)
-    visual.html / visual.js                     # visual history: by model/interval or by day, with stats
-    population.html / .css / .js                # the evolving model's population: deaths, generations, genes
-    fund.html / .css / .js                      # the strategy fund: position now and why, money, years, genes
+  web/                          # React + TypeScript SPA (Vite, Tailwind CSS v4) - see "Frontend"
+    src/pages/                  # Landing, Dashboard, Scout, AssetDetail, Population, Fund, eval/{Evaluation,History,Visual}
+    src/components/             # Shell (nav), PriceChart (lightweight-charts), shared UI primitives
+    src/lib/                    # typed API client, formatting, indicators + Buy/Sell heuristic, chart theme
+    src/i18n/                   # EN/RO dictionary + runtime
+  dist/                         # production build (git-ignored), served by Flask
 
 docs/
   images/                        # screenshots and charts used in this README
@@ -278,12 +273,13 @@ docker run -d --name eth-mongo -p 27017:27017 mongo:7
 
 ## Running
 
-A single process. Flask serves the API, all the static frontend
-(`frontend/web/`), and periodic data collection (candles + news + Scout AI
+A single process. Flask serves the API, the built frontend
+(`frontend/dist/`, see [Frontend](#frontend)), and periodic data collection (candles + news + Scout AI
 scanning), all on the same port:
 
 ```bash
-cd /home/singeon/Documents/Alfa
+# once, and after any frontend change:
+(cd frontend/web && npm install && npm run build)
 
 # Flask API + dashboard + Scout AI + data collector, at http://localhost:5000
 .venv/bin/python run_api.py
@@ -314,9 +310,35 @@ doesn't block the scheduler from starting) — it takes a few minutes, since it
 trains a real model per asset across ~135 assets (the original `legacy` model;
 the evolving `tuned` population is only used for the dashboard's coin).
 
+## Frontend
+
+A React 19 + TypeScript single-page app in `frontend/web/` (Vite, Tailwind CSS
+v4, TanStack Query for polling, React Router, lightweight-charts 4). Flask
+serves its production build from `frontend/dist/` and falls back to
+`index.html` for every client-side route; the old `*.html` URLs
+(`/dashboard.html`, `/detail.html?type=&id=`, ...) redirect to the new ones.
+
+```bash
+cd frontend/web
+npm install
+npm run dev     # http://localhost:5174, proxies /api to ALFA_API (default http://127.0.0.1:5050)
+npm run build   # type-check + build into ../dist, then just run `python run_api.py`
+```
+
+During development run the API with `FLASK_PORT=5050 python run_api.py`
+(on macOS port 5000 is taken by AirPlay Receiver).
+
+Routes: `/` landing · `/dashboard` · `/scout` · `/asset/:type/:id` ·
+`/evaluation` · `/history` · `/visual` · `/population` · `/fund`.
+
+Design tokens (colors, fonts, radii) live in `src/styles/index.css`; chart
+colors are read from the same CSS variables at runtime (`src/lib/theme.ts`).
+The Buy/Sell/Wait heuristic in `src/lib/indicators.ts` must stay in sync with
+`ml/trading_signal.py`, which backtests the same rule.
+
 ## ETH Dashboard
 
-`http://localhost:5000/dashboard.html` (the landing page at `/` links to it) — a candlestick chart (Lightweight Charts) with:
+`http://localhost:5000/dashboard` (the landing page at `/` links to it) — a candlestick chart (Lightweight Charts) with:
 - an overlaid prediction + confidence band, SMA/EMA/Bollinger/Fibonacci indicators,
 - a price tooltip that tracks the mouse (read directly off the price scale
   at the cursor's Y position, so it always matches the axis exactly — also
@@ -376,7 +398,7 @@ settings, for tests and experiments.
 
 ## Scout AI
 
-`http://localhost:5000/scout.html` — scans:
+`http://localhost:5000/scout` — scans:
 - **Underdogs**: crypto ranked 30-250 on CoinGecko + "trending" coins, stocks
   from the Yahoo Finance screeners `small_cap_gainers` / `aggressive_small_caps` /
   `undervalued_growth_stocks`. They show up if the prediction is positive and
@@ -487,7 +509,7 @@ prediction is logged, and redrawn every minute that new real candles arrive.
 24-step forecasts (`EVAL_SNAPSHOT_STEPS`) get a new row + image every time the
 forecast actually changes (the model retrained into a different answer). A
 repeat of the same forecast is skipped. Other horizons keep one per candle.
-`/visual.html` shows them (see [Visual history](#visual-history)).
+`/visual` shows them as a gallery, newest first (see [Visual history](#visual-history)).
 
 | While it's running | Once it's completed |
 |---|---|
@@ -518,17 +540,17 @@ data/charts/
 every minute with the evaluation job; `GET /api/evaluation/stats` returns the
 same numbers. PNGs from the old flat `YYYY-MM-DD/` layout are moved on startup.
 
-**Dashboard.** `/evaluation.html` has the per-model summary and the table,
+**Dashboard.** `/evaluation` has the per-model summary and the table,
 with filters (interval, model, status, dates), sorting by clicking a column,
 pagination, CSV export, and a click on a completed row to open its chart.
-`/history.html` shows the daily overviews with a date selector.
-`/visual.html` is the visual history (below).
+`/history` shows the daily overviews with a date selector.
+`/visual` is the visual history gallery (below).
 
 ![Evaluation page: per-model summary and the filterable table of every prediction](docs/images/evaluation.png)
 
 ### Visual history
 
-`http://localhost:5000/visual.html` is organized the same way as the folders
+`http://localhost:5000/visual` is organized the same way as the folders
 on disk, with statistics at every level:
 
 - **General statistics** on top: predictions (completed / pending / expired),
@@ -753,7 +775,7 @@ Population size doesn't change it either: on the same 4h history, 12, 24,
 48 and 96 models all landed at ~50% direction (two seeds each); the cost
 grows with the size, the accuracy doesn't. 24 stays the default.
 
-**The population page** (`/population.html`, "🧬 Model population" in the
+**The population page** (`/population`, "🧬 Model population" in the
 top bar, or the link in the dashboard card) shows everything about one
 interval's population: its whole life on a time line (ETH price, deaths
 per period, mood), **why models died** (one fatal miss / repeated misses /
@@ -830,7 +852,7 @@ The evolving population above showed that where ETH goes next is not
 predictable here. How much it will move is: the volatility of the last day
 predicts the next day's with a correlation of 0.66, against -0.006 for the
 direction. The strategy fund trades on that (`ml/strategy_lab.py`,
-`ml/strategy_evolution.py`, `ml/strategy_fund.py`, page `/fund.html`,
+`ml/strategy_evolution.py`, `ml/strategy_fund.py`, page `/fund`,
 "💼 Strategy fund" in the top bar, and a card on the dashboard).
 
 Checks made first, nine years of ETH, every model trained only on the past:

@@ -1,148 +1,18 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ETH Price Predictor</title>
-<meta name="description" content="AI-driven ETH price predictions with a backtested Buy/Sell signal, plus growth-opportunity scanning across mid-cap stocks and crypto (and the occasional mega-cap breakout), powered by a Scout AI scanner.">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/style.css">
-<link rel="stylesheet" href="/landing.css">
-</head>
-<body>
-<canvas id="ambientField" aria-hidden="true"></canvas>
-<div class="landing">
-
-  <header class="topbar topbar--landing">
-    <a class="brand" href="/">
-      <img class="brand-logo" src="/logo.png" alt="ETH Price Predictor">
-    </a>
-    <nav class="topbar-actions">
-      <a class="nav-link" href="/dashboard.html"><span aria-hidden="true">📈</span> <span data-i18n="nav.dashboard">ETH Dashboard</span></a>
-      <a class="nav-link" href="/scout.html"><span aria-hidden="true">🔎</span> <span data-i18n="nav.scout">Scout AI</span></a>
-      <a class="nav-link" href="/evaluation.html"><span aria-hidden="true">🎯</span> <span data-i18n="nav.evaluation">Evaluation</span></a>
-      <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="nav.langToggleLabel">
-        <button data-lang="en" type="button">EN</button>
-        <button data-lang="ro" type="button">RO</button>
-      </div>
-    </nav>
-  </header>
-
-  <section class="hero">
-    <div class="hero-copy">
-      <p class="hero-eyebrow" data-i18n="landing.eyebrow">AI predictions for the crypto market</p>
-      <h1 class="hero-title">
-        <span data-i18n="landing.title.line">AI predictions for ETH price and</span>
-        <span class="hero-title-accent" data-i18n="landing.title.accent">growth opportunities</span>
-        <span data-i18n="landing.title.tail">in mid-cap stocks &amp; crypto</span>
-        <canvas id="accentEmitCanvas" aria-hidden="true"></canvas>
-      </h1>
-      <p class="hero-subtitle" data-i18n="landing.subtitle">
-        A live, zoomable candlestick chart with multi-horizon forecasts, a
-        backtested Buy/Sell signal, real-time news sentiment, and a
-        "Scout AI" scanner hunting underdogs (and the occasional mega-cap
-        breakout) with real upside.
-      </p>
-      <div class="hero-actions">
-        <a class="btn-cta" href="/dashboard.html" data-i18n="landing.cta.primary">Open the Dashboard →</a>
-        <a class="btn-cta-secondary" href="/scout.html" data-i18n="landing.cta.secondary">See Scout AI</a>
-      </div>
-      <p class="hero-disclaimer" data-i18n="landing.disclaimer">Automated estimates from historical data and sentiment — not financial advice.</p>
-    </div>
-    <div class="hero-canvas-stack">
-      <canvas id="ethHero" class="hero-canvas hero-canvas--sharp" aria-hidden="true"></canvas>
-      <canvas id="ethHeroGlow" class="hero-canvas hero-canvas--glow" aria-hidden="true"></canvas>
-    </div>
-  </section>
-
-  <section class="landing-section">
-    <div class="landing-section-head">
-      <h2 class="section-title" data-i18n="landing.howItWorks.title">How it works</h2>
-      <p class="section-subtitle" data-i18n="landing.howItWorks.subtitle">From raw data to a confidence-scored signal, fully automated.</p>
-    </div>
-    <ol class="steps">
-      <li class="step-card">
-        <span class="step-index">01</span>
-        <span class="step-icon" aria-hidden="true">📡</span>
-        <h3 data-i18n="landing.step1.title">Data collection</h3>
-        <p data-i18n="landing.step1.body">Live price and candles from Binance (CoinGecko/Etherscan fallback), DeFi TVL from DeFiLlama, and news from 10 crypto RSS sources.</p>
-      </li>
-      <li class="step-card">
-        <span class="step-index">02</span>
-        <span class="step-icon" aria-hidden="true">🧮</span>
-        <h3 data-i18n="landing.step2.title">Indicators + sentiment</h3>
-        <p data-i18n="landing.step2.body">RSI, MACD, Bollinger Bands and the buy/sell ratio, combined with a VADER sentiment score for every news article.</p>
-      </li>
-      <li class="step-card">
-        <span class="step-index">03</span>
-        <span class="step-icon" aria-hidden="true">🤖</span>
-        <h3 data-i18n="landing.step3.title">Per-interval ML model</h3>
-        <p data-i18n="landing.step3.body">A scikit-learn ensemble trained separately for each interval (15m/1h/4h/1d/1w), auto-recalibrated as new data arrives.</p>
-      </li>
-      <li class="step-card">
-        <span class="step-index">04</span>
-        <span class="step-icon" aria-hidden="true">🎯</span>
-        <h3 data-i18n="landing.step4.title">Prediction + confidence</h3>
-        <p data-i18n="landing.step4.body">An estimated price with a confidence interval, a Buy/Sell/Wait signal with its own backtested accuracy history, and a calibrated confidence score — updated continuously.</p>
-      </li>
-    </ol>
-  </section>
-
-  <section class="landing-section">
-    <div class="landing-section-head">
-      <h2 class="section-title" data-i18n="landing.features.title">What's included</h2>
-      <p class="section-subtitle" data-i18n="landing.features.subtitle">One dashboard for ETH, plus a separate scanner for the rest of the market.</p>
-    </div>
-    <div class="feature-grid">
-      <div class="feature-card">
-        <span class="feature-icon" aria-hidden="true">⏱️</span>
-        <h3 data-i18n="landing.feature1.title">Multi-horizon forecasts</h3>
-        <p data-i18n="landing.feature1.body">From 15 minutes to a week — each interval trains its own model on its own specific history.</p>
-      </div>
-      <div class="feature-card">
-        <span class="feature-icon" aria-hidden="true">📈</span>
-        <h3 data-i18n="landing.feature2.title">Advanced technical indicators</h3>
-        <p data-i18n="landing.feature2.body">SMA, EMA, Bollinger, Fibonacci, VWAP, and automatic pattern detection (triangles, channels, cup-and-handle, and more).</p>
-      </div>
-      <div class="feature-card">
-        <span class="feature-icon" aria-hidden="true">📰</span>
-        <h3 data-i18n="landing.feature3.title">Real-time news sentiment</h3>
-        <p data-i18n="landing.feature3.body">10 crypto RSS sources, a VADER score per article, and a daily narrative summary of what's moving the price.</p>
-      </div>
-      <div class="feature-card">
-        <span class="feature-icon" aria-hidden="true">🔎</span>
-        <h3 data-i18n="landing.feature4.title">Scout AI — underdogs</h3>
-        <p data-i18n="landing.feature4.body">Scans mid/small-cap stocks and crypto (not BTC/ETH/AAPL) and ranks them by estimated growth potential — plus a stricter watch that still surfaces a mega-cap when the model calls for a genuinely dramatic move.</p>
-      </div>
-      <div class="feature-card">
-        <span class="feature-icon" aria-hidden="true">✅</span>
-        <h3 data-i18n="landing.feature5.title">Backtested Buy/Sell signal</h3>
-        <p data-i18n="landing.feature5.body">A transparent Buy/Sell/Wait call from trend, RSI, MACD and sentiment — walk-forward tested against real outcomes, with its own accuracy history shown right on the dashboard.</p>
-      </div>
-      <div class="feature-card">
-        <span class="feature-icon" aria-hidden="true">🖱️</span>
-        <h3 data-i18n="landing.feature6.title">Live, zoomable chart</h3>
-        <p data-i18n="landing.feature6.body">Every number on the dashboard refreshes automatically; the chart supports free pan and cursor-anchored zoom, like a real trading terminal.</p>
-      </div>
-    </div>
-  </section>
-
-  <footer class="landing-footer">
-    <div class="brand landing-footer-brand">
-      <img class="brand-logo" src="/logo.png" alt="ETH Price Predictor">
-    </div>
-    <p class="landing-disclaimer" data-i18n="landing.footer.disclaimer">
-      All predictions and scores are automated estimates from historical data and news sentiment — not financial advice.
-    </p>
-  </footer>
-
-</div>
-<script src="/i18n.js"></script>
-<script src="/ambient-particles.js"></script>
-<script src="/accent-particles.js"></script>
-<script src="/topbar-scroll.js"></script>
-<script src="/landing.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0d0c0a" />
+    <link rel="preload" as="image" href="/logo.png" />
+    <title>ETH Price Predictor & Scout AI</title>
+    <meta
+      name="description"
+      content="AI-driven ETH price predictions with a backtested Buy/Sell signal, plus growth-opportunity scanning across mid-cap stocks and crypto, powered by a Scout AI scanner."
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>

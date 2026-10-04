@@ -57,7 +57,7 @@ CHANNEL_WINDOW = 20
 def _note(en: str, ro: str, lang: str) -> str:
     """Pick the localized wording for a pattern's `note` field. Pattern
     `name`s themselves stay in English everywhere (standard TA terminology,
-    also matched by name in frontend/web/app.js's PATTERN_TWO_LINE_NAMES) -
+    also matched by name in frontend/web/src/components/PriceChart.tsx's TWO_LINE_PATTERNS) -
     only the free-text explanation is translated.
     """
     return ro if lang == "ro" else en
