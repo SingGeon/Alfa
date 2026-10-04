@@ -1,11 +1,11 @@
 """Trading-signal scoring - the exact same weighted heuristic the
 dashboard's "Trading signal" card computes client-side
-(frontend/web/app.js's updateSignalPanel), ported to Python so
+(frontend/web/src/lib/indicators.ts's computeSignal), ported to Python so
 data_collector.jobs.backfill_signal_history can evaluate what this rule
 would have called historically against real outcomes, instead of the live
 badge being an unverifiable black box.
 
-Keep this in sync with app.js by hand if that formula ever changes - there
+Keep this in sync with indicators.ts by hand if that formula ever changes - there
 is no shared implementation between the two, by necessity (one runs in the
 browser against client-computed RSI/MACD, the other runs here against a
 point-in-time retrained model for the backtest).
@@ -45,7 +45,7 @@ def compute_signal_score(
 def compute_signal_label(
     trend_pct: float, rsi: float | None, macd_bullish: bool | None, sentiment_avg: float, confidence: float,
 ) -> str:
-    """"buy" | "sell" | "wait" - mirrors app.js exactly: both a strong
+    """"buy" | "sell" | "wait" - mirrors indicators.ts exactly: both a strong
     enough score AND a high enough model confidence are required, or a
     wildly volatile but low-confidence prediction (see the 1w interval's
     5/100-confidence +21% call, confirmed live) would otherwise fire a

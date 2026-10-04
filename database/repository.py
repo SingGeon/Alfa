@@ -366,7 +366,7 @@ def get_scout_results(asset_type: str | None = None, limit: int = 100) -> list[d
     return list(cursor)
 
 
-# --- Pinned assets (user bookmarks, see scout.html "Fixate") -------------------
+# --- Pinned assets (user bookmarks, see the Scout page's "Pinned" filter) ------
 #
 # Kept as its own tiny collection rather than a flag on scout_results: a
 # pin needs to survive save_scout_results()'s full delete+reinsert (an

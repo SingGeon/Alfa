@@ -15,7 +15,7 @@ from nlp import sentiment
 logger = logging.getLogger(__name__)
 
 # Intervals the "Precizia predicției" accuracy charts let you pick between
-# (see frontend/web/app.js's accuracyIntervalGroup). Recorded here on a
+# (see the dashboard's accuracy panel, frontend/web/src/pages/Dashboard.tsx). Recorded here on a
 # fixed schedule rather than relying on run_prediction() being called
 # incidentally by a live dashboard request: that only saved a snapshot for
 # whatever interval a browser tab happened to have open at the time, so

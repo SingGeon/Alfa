@@ -17,6 +17,9 @@ scipy==1.17.1
 matplotlib==3.11.2
 pillow==10.4.0
 
+# --- Stocks (Scout AI stock universe + prices) ---
+yfinance==1.7.0
+
 # --- NLP ---
 vaderSentiment==3.3.2
 feedparser==6.0.11
