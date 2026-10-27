@@ -1,6 +1,7 @@
 """The live strategy fund: ml/strategy_evolution.py on the full ETH history,
-for the intervals where it beat buy & hold out of sample (4h and 1d; on 1h
-fees ate it, 15m is still to be tested - see README, "Strategy fund").
+for the intervals where it grew with an acceptable drawdown out of sample
+(4h and 1d; on 1h fees ate the profit, 15m is still to be tested - see
+README, "Strategy fund").
 
 compute() replays everything since Binance listed ETHUSDT (August 2017),
 so the same candles always give the same fund, and saves one JSON report
@@ -57,12 +58,12 @@ def _result(r: lab.Result) -> dict:
 
 def _curve(df: pd.DataFrame, fund: np.ndarray, r_next: np.ndarray, live: np.ndarray) -> list[dict]:
     idx = np.flatnonzero(live)
-    f, b = lab.wealth(fund, r_next, live), lab.wealth(np.ones(len(df)), r_next, live)
+    f = lab.wealth(fund, r_next, live)
     # wealth[k] is the money once candle idx[k]+1 has closed; start at 100 the candle before.
     times = [df.index[idx[0]]] + [df.index[min(i + 1, len(df) - 1)] for i in idx]
-    f, b, pos = np.concatenate([[lab.START], f]), np.concatenate([[lab.START], b]), np.concatenate([[0.0], fund[idx]])
+    f, pos = np.concatenate([[lab.START], f]), np.concatenate([[0.0], fund[idx]])
     keep = np.unique(np.linspace(0, len(times) - 1, min(CURVE_POINTS, len(times))).astype(int))
-    return [{"time": times[i].isoformat(), "fund": round(float(f[i]), 2), "buy_hold": round(float(b[i]), 2),
+    return [{"time": times[i].isoformat(), "fund": round(float(f[i]), 2),
              "position": round(float(pos[i]), 3)} for i in keep]
 
 
@@ -80,18 +81,15 @@ def compute(interval: str) -> dict:
     start = runs[0][1][0]["t"]
     live = np.zeros(ctx["n"], dtype=bool)
     live[start:] = True
-    ones = np.ones(ctx["n"])
     r_next = ctx["r_next"]
 
     def pair(mask):
-        return {"fund": _result(lab.simulate(fund, r_next, ctx["per_year"], mask)),
-                "buy_hold": _result(lab.simulate(ones, r_next, ctx["per_year"], mask))}
+        return {"fund": _result(lab.simulate(fund, r_next, ctx["per_year"], mask))}
 
     years = []
     for y in sorted(set(df.index[live].year)):
         p = pair(live & (df.index.year == y))
         years.append({"year": int(y), "fund_pct": p["fund"]["ret_pct"], "fund_dd": p["fund"]["max_dd_pct"],
-                      "buy_hold_pct": p["buy_hold"]["ret_pct"], "buy_hold_dd": p["buy_hold"]["max_dd_pct"],
                       "trades": p["fund"]["trades"]})
 
     # Why it holds what it holds: every top strategy's three pieces at the
@@ -180,9 +178,8 @@ def main() -> None:
     for interval in args.interval or FUND_INTERVALS:
         rep = compute(interval)
         t, w = rep["test"], rep["whole_life"]
-        print(f"{interval}: position now {rep['now']['position']:+.2f} | TEST {t['fund']['money']:.2f} EUR "
-              f"(buy & hold {t['buy_hold']['money']:.2f}) | since {rep['trading_from'][:10]} {w['fund']['money']:.2f} EUR "
-              f"(buy & hold {w['buy_hold']['money']:.2f}) | {rep['compute_seconds']:.0f}s")
+        print(f"{interval}: position now {rep['now']['position']:+.2f} | TEST {t['fund']['money']:.2f} EUR | "
+              f"since {rep['trading_from'][:10]} {w['fund']['money']:.2f} EUR | {rep['compute_seconds']:.0f}s")
 
 
 if __name__ == "__main__":

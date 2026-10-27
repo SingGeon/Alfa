@@ -47,6 +47,13 @@ NEWS_RSS_FEEDS = [
     "https://www.newsbtc.com/feed/",
     "https://bitcoinist.com/feed/",
     "https://beincrypto.com/feed/",
+    "https://blockworks.com/feed",
+    "https://thedefiant.io/api/feed",
+    "https://cryptobriefing.com/feed/",
+    "https://www.coinspeaker.com/feed/",
+    "https://ambcrypto.com/feed/",
+    "https://dailyhodl.com/feed/",
+    "https://www.crypto-news-flash.com/feed/",
 ]
 NEWS_KEYWORDS = ["ethereum", "ether", "eth"]
 

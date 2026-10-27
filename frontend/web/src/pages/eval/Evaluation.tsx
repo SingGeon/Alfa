@@ -2,12 +2,33 @@ import clsx from "clsx";
 import { useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Check, Download, RotateCcw, X } from "lucide-react";
-import { apiGet, buildUrl, type EvalPredictionsResponse } from "../../lib/api";
+import { apiGet, buildUrl, type EvalPredictionsResponse, type ModelValidation } from "../../lib/api";
 import { fmtMoney, fmtPct, userTimeZone } from "../../lib/format";
 import { useI18n } from "../../i18n";
 import { Page } from "../../components/Shell";
-import { buttonClass, Button, Empty, ErrorBanner, ImageViewer, Pager, Panel, PanelHeader, Skeleton } from "../../components/ui";
+import { Badge, buttonClass, Button, Empty, ErrorBanner, ImageViewer, Pager, Panel, PanelHeader, Skeleton } from "../../components/ui";
 import { EvalTabs, StatTiles, StatusPill } from "./common";
+
+/** Does this model's own completed track record actually carry statistically significant
+ * direction skill? (evaluator.validate_model_skill - Ch. 7's validation discipline). Pools
+ * every interval (the current table filter's interval, if any). */
+function ModelValidationBadge({ model, interval }: { model: string; interval: string }) {
+  const { t } = useI18n();
+  const q = useQuery({
+    queryKey: ["eval-validation", model, interval],
+    queryFn: () => apiGet<ModelValidation>("/api/evaluation/validation", { model, interval: interval || undefined }),
+  });
+  if (!q.data) return null;
+  const v = q.data;
+  if (v.low_sample) return <Badge tone="neutral">{t("eval.validation.lowSample", { n: v.n_signal })}</Badge>;
+  const bestP = [v.anova_p, v.chi2_p].filter((x): x is number => x != null);
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Badge tone={v.significant ? "up" : "neutral"}>{t(v.significant ? "eval.validation.significant" : "eval.validation.notSignificant")}</Badge>
+      <span className="text-[11px] text-faint">{t("eval.validation.stats", { n: v.n_signal, p: bestP.length ? Math.min(...bestP).toFixed(3) : "—" })}</span>
+    </span>
+  );
+}
 
 const PAGE_SIZE = 50;
 const EMPTY_FILTERS = { interval: "", model: "", status: "", date_from: "", date_to: "" };
@@ -62,6 +83,7 @@ export default function Evaluation() {
 
       <section className="mb-8">
         <div className="eyebrow mb-3">{t("eval.summary.header")}</div>
+        {filters.model === "sklearn-tuned" && <p className="mb-3 text-[12.5px] text-faint">{t("eval.tunedNote")}</p>}
         {!data.data ? (
           <Skeleton className="h-24" />
         ) : !data.data.summary.length ? (
@@ -70,7 +92,10 @@ export default function Evaluation() {
           <div className="grid gap-4 xl:grid-cols-2">
             {data.data.summary.map((m) => (
               <div key={m.model_name}>
-                <div className="num mb-2 text-[13px] font-semibold text-accent">{m.model_name}</div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <span className="num text-[13px] font-semibold text-accent">{m.model_name}</span>
+                  <ModelValidationBadge model={m.model_name} interval={filters.interval} />
+                </div>
                 <StatTiles s={{ ...m, expired: 0 }} className="!grid-cols-3 xl:!grid-cols-3" />
               </div>
             ))}

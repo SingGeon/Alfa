@@ -77,6 +77,73 @@ def test_compute_errors_flat_prediction_only_correct_if_flat():
     assert evaluator.compute_errors(100, 100, 101)["direction_correct"] is False
 
 
+# --- statistical validation of a model's live track record (ml.signal_validation) -----------
+
+def _log_and_complete(i, model, interval, predicted_up, actual_up, price=100.0):
+    # Spaced 2h apart so log_prediction's own de-dup window (narrower than that) never skips one.
+    created_at = T0 + timedelta(hours=i * 2)
+    pred_price = price + (5.0 if predicted_up else -5.0)
+    pid = storage.log_prediction(
+        interval=interval, model_name=model, price_at_prediction=price,
+        predictions=[{
+            "timestamp": (created_at + storage.interval_delta(interval)).isoformat(),
+            "predicted_price": pred_price, "lower": pred_price - 10, "upper": pred_price + 10,
+        }],
+        confidence=70.0, signal="buy", created_at=created_at,
+    )
+    actual_price = price + (5.0 if actual_up else -5.0)
+    e = evaluator.compute_errors(price, pred_price, actual_price)
+    storage.complete_prediction(
+        pid, actual_path=[], actual_final_price=actual_price, abs_error=e["abs_error"],
+        pct_error=e["pct_error"], direction_correct=e["direction_correct"],
+        completed_at=created_at + timedelta(hours=1),
+    )
+    return pid
+
+
+def test_validate_model_skill_detects_a_real_track_record():
+    model = "sklearn-tuned"
+    for i in range(40):
+        predicted_up = i % 2 == 0
+        _log_and_complete(i, model, "1h", predicted_up, actual_up=predicted_up)   # always right
+    out = evaluator.validate_model_skill(model, interval="1h")
+    assert out["n_signal"] == 20 and out["n_baseline"] == 20
+    assert out["low_sample"] is False
+    assert out["mean_return_signal_pct"] > out["mean_return_baseline_pct"]
+    assert out["significant"] is True
+
+
+def test_validate_model_skill_low_sample_with_few_predictions():
+    model = "sklearn-legacy"
+    for i in range(5):
+        _log_and_complete(i, model, "1h", predicted_up=True, actual_up=True)
+    out = evaluator.validate_model_skill(model, interval="1h")
+    assert out["low_sample"] is True
+    assert out["significant"] is False
+
+
+def test_validate_model_skill_with_no_predictions_is_inert():
+    out = evaluator.validate_model_skill("no-such-model")
+    assert out["n_signal"] == 0 and out["low_sample"] is True and out["significant"] is False
+
+
+def test_validation_endpoint_requires_a_model(client):
+    assert client.get("/api/evaluation/validation").status_code == 400
+
+
+def test_validation_endpoint_returns_the_skill_check(client):
+    model = "sklearn-tuned"
+    for i in range(40):
+        predicted_up = i % 2 == 0
+        _log_and_complete(i, model, "1h", predicted_up, actual_up=predicted_up)
+    resp = client.get(f"/api/evaluation/validation?model={model}&interval=1h")
+    assert resp.status_code == 200
+    body = resp.json
+    assert body["model"] == model and body["interval"] == "1h"
+    assert body["n_signal"] == 20
+    assert body["low_sample"] is False
+
+
 # --- storage ----------------------------------------------------------------
 
 def test_log_prediction_stores_fields_and_signal_label():
@@ -385,11 +452,93 @@ def test_api_snapshot_for_pending_prediction(client):
 
 
 def test_run_prediction_24_steps_stores_history_and_draws_snapshot(client, synthetic_candles):
+    # "legacy", not "tuned": ml.evolution ("tuned") is excluded from forecast logging/
+    # snapshotting - its job is deciding when to trade, not predicting a price, so it gets its
+    # own trade-entry/exit snapshots instead (see evaluation.trade_watch and
+    # test_evolution_trade_snapshot_drawn_on_entry_and_exit).
     repository.save_candles("ethereum", "1h", synthetic_candles(200))
-    assert client.get("/api/predict?interval=1h&steps=24&model_variant=tuned").status_code == 200
+    assert client.get("/api/predict?interval=1h&steps=24&model_variant=legacy").status_code == 200
     row = storage.query_predictions({"horizon_steps": 24})[0][0]
     assert len(row["history_path"]) == config.EVAL_SNAPSHOT_HISTORY_CANDLES
     assert charts.snapshot_path(row).exists()
+
+
+def test_tuned_predictions_are_not_logged_or_snapshotted(client, synthetic_candles):
+    repository.save_candles("ethereum", "1h", synthetic_candles(200))
+    assert client.get("/api/predict?interval=1h&steps=24&model_variant=tuned").status_code == 200
+    rows, _ = storage.query_predictions({"model": "sklearn-tuned"})
+    assert rows == []
+
+
+def test_evolution_trade_snapshot_drawn_on_entry_and_exit(synthetic_candles):
+    """evaluation.trade_watch draws a snapshot the instant a trade opens, and another the
+    instant it closes - never on a timer, never a forecast line."""
+    import pandas as pd
+
+    from evaluation import trade_watch
+    from ml import evolution
+
+    candles = synthetic_candles(300)
+    repository.save_candles("ethereum", "1h", candles)
+    df = pd.DataFrame(candles).set_index("timestamp")
+    ev = evolution.EvolutionaryForecaster(interval="1h").fit(df)
+    t = ev.t_last
+    trade = {"side": "long", "entry_bar": t - 40, "entry_time": ev.index[t - 40].isoformat(),
+             "entry_price": 3000.0, "exit_bar": None, "exit_time": None, "exit_price": None, "return_pct": None}
+    ev.fund_trades = [trade]
+    evolution.save_state("ethereum_1h", ev)
+
+    assert trade_watch.check_interval("ethereum", "1h", "sklearn-tuned") == 1
+    entry_path = charts.trade_snapshot_path("sklearn-tuned", "1h", trade, "entry")
+    assert entry_path.exists()
+    assert trade_watch.check_interval("ethereum", "1h", "sklearn-tuned") == 0  # unchanged: nothing new to draw
+
+    trade = {**trade, "exit_bar": t - 5, "exit_time": ev.index[t - 5].isoformat(), "exit_price": 3100.0, "return_pct": 3.33}
+    ev.fund_trades = [trade]
+    evolution.save_state("ethereum_1h", ev)
+    assert trade_watch.check_interval("ethereum", "1h", "sklearn-tuned") == 1
+    exit_path = charts.trade_snapshot_path("sklearn-tuned", "1h", trade, "exit")
+    assert exit_path.exists()
+
+
+def test_evolution_trades_api_exposes_snapshot_urls(client, synthetic_candles):
+    """GET /api/evolution/trades attaches entry/exit_snapshot_url only for trades
+    evaluation.trade_watch actually drew a PNG for; GET .../snapshot.png serves it."""
+    import pandas as pd
+
+    from evaluation import trade_watch
+    from ml import evolution
+
+    candles = synthetic_candles(300)
+    repository.save_candles("ethereum", "1h", candles)
+    df = pd.DataFrame(candles).set_index("timestamp")
+    ev = evolution.EvolutionaryForecaster(interval="1h").fit(df)
+    t = ev.t_last
+    drawn = {"side": "long", "entry_bar": t - 40, "entry_time": ev.index[t - 40].isoformat(),
+             "entry_price": 3000.0, "exit_bar": None, "exit_time": None, "exit_price": None, "return_pct": None}
+    undrawn = {"side": "short", "entry_bar": t - 20, "entry_time": ev.index[t - 20].isoformat(),
+               "entry_price": 2900.0, "exit_bar": None, "exit_time": None, "exit_price": None, "return_pct": None}
+    ev.fund_trades = [drawn]
+    evolution.save_state("ethereum_1h", ev)
+    assert trade_watch.check_interval("ethereum", "1h", "sklearn-tuned") == 1  # draws `drawn`'s entry snapshot
+
+    ev.fund_trades = [drawn, undrawn]
+    evolution.save_state("ethereum_1h", ev)
+
+    resp = client.get("/api/evolution/trades?interval=1h")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    rows = {r["entry_time"]: r for r in body["trades"]}
+    assert rows[drawn["entry_time"]]["entry_snapshot_url"] is not None
+    assert rows[drawn["entry_time"]]["exit_snapshot_url"] is None  # still open
+    assert rows[undrawn["entry_time"]]["entry_snapshot_url"] is None  # trade_watch never saw this one open
+
+    png = client.get(rows[drawn["entry_time"]]["entry_snapshot_url"])
+    assert png.status_code == 200
+    assert png.mimetype == "image/png"
+
+    missing = client.get("/api/evolution/trades/snapshot.png?interval=1h&entry_time=2020-01-01T00:00:00Z&kind=entry")
+    assert missing.status_code == 404
 
 
 def test_old_database_gets_history_column(tmp_path, monkeypatch):

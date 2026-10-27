@@ -17,6 +17,7 @@ const AssetDetail = lazy(() => import("./pages/AssetDetail"));
 const Evaluation = lazy(() => import("./pages/eval/Evaluation"));
 const History = lazy(() => import("./pages/eval/History"));
 const Visual = lazy(() => import("./pages/eval/Visual"));
+const Trades = lazy(() => import("./pages/eval/Trades"));
 const Population = lazy(() => import("./pages/Population"));
 const Fund = lazy(() => import("./pages/Fund"));
 
@@ -76,6 +77,7 @@ const router = createBrowserRouter([
       { path: "/evaluation", element: <Lazy><Evaluation /></Lazy> },
       { path: "/history", element: <Lazy><History /></Lazy> },
       { path: "/visual", element: <Lazy><Visual /></Lazy> },
+      { path: "/trades", element: <Lazy><Trades /></Lazy> },
       { path: "/population", element: <Lazy><Population /></Lazy> },
       { path: "/fund", element: <Lazy><Fund /></Lazy> },
       { path: "/index.html", element: <Navigate to="/" replace /> },

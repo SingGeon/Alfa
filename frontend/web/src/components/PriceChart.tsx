@@ -8,17 +8,22 @@ import {
   type IPriceLine,
   type ISeriesApi,
   type SeriesMarker,
+  type SeriesType,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 import { Radio } from "lucide-react";
-import type { Candle, GeometricPattern, CandlePattern, PredictionPoint } from "../lib/api";
-import { bollinger, ema, FIB_LEVELS, sma, vwap } from "../lib/indicators";
+import type { Candle, GeometricPattern, CandlePattern, PredictionPoint, StrategyBox, StrategyTrade, EvolutionTrade } from "../lib/api";
+import {
+  bollinger, confirmedTrend, ema, fibEntrySignals, FIB_LEVELS, findFractals, findLastSwing, futurePriceLabels,
+  rollingSlope, sma, smaBollingerSignals, supportResistanceLevels, vwap,
+} from "../lib/indicators";
 import { chartColors, CHART_FONT } from "../lib/theme";
 import { fmtMoney, toUnix } from "../lib/format";
 import { useI18n } from "../i18n";
 
-export type IndicatorKey = "sma" | "ema" | "bollinger" | "fibonacci" | "vwap";
+export type IndicatorKey =
+  | "sma" | "ema" | "bollinger" | "fibonacci" | "vwap" | "regression" | "fractals" | "levels" | "futureLabel";
 export type Indicators = Record<IndicatorKey, boolean>;
 
 export interface PriceChartHandle {
@@ -41,6 +46,20 @@ interface Props {
   chartType?: "candles" | "line";
   indicators?: Partial<Indicators>;
   patterns?: { candlestick: CandlePattern[]; geometric: GeometricPattern | null; necklineLabel: string; targetLabel: string } | null;
+  box?: {
+    boxes: StrategyBox[];
+    trades: StrategyTrade[];
+    openTrade: StrategyTrade | null;
+    lastTime: string;
+    /** Does the aggregate breakout-up / breakout-down signal (ml.signal_validation) hold up
+     * statistically over this whole window? null = not computed yet, false = drawn neutral/grey
+     * instead of the usual up/down color (same demotion already used for unconfirmed volume). */
+    significantUp?: boolean | null;
+    significantDown?: boolean | null;
+  } | null;
+  /** The evolution fund's own entry/exit history - markers plus a live price line for an open
+   * position, never a predicted price line (see memory feedback-chart-entry-exit-not-prediction). */
+  evolutionTrades?: { trades: EvolutionTrade[]; lastClose?: number | null } | null;
   /** Changing this resets the view (e.g. interval switch). */
   viewKey?: string;
   /** With a new viewKey: show the whole loaded window instead of the last N bars. */
@@ -66,12 +85,30 @@ const TWO_LINE_PATTERNS = new Set([
 
 const ts = (iso: string) => toUnix(iso) as UTCTimestamp;
 
+const BOX_MAX_DRAWN = 40;
+const BOX_EXIT_LABEL: Record<string, string> = { stop: "SL", target: "TP", trail_stop: "Trail", reverse: "Rev" };
+
+function withAlpha(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+// The evolution fund trades virtual EUR (ml/evolution.py's START_MONEY), not USD like the
+// asset's own price - fmtMoney's "$" prefix would be misleading there. Tolerates a missing
+// amount (an already-open trade from before this field existed, still on disk) rather than
+// showing "€NaN" until that trade rolls over.
+function fmtEur(v: number | null | undefined): string {
+  return v == null || Number.isNaN(v) ? "" : `€${Math.round(v).toLocaleString("en-US")}`;
+}
+
 export function PriceChart({
   candles,
   predictions = [],
   chartType = "candles",
   indicators = {},
   patterns = null,
+  box = null,
+  evolutionTrades = null,
   viewKey = "",
   fitAll = false,
   defaultWindow = 120,
@@ -104,7 +141,18 @@ export function PriceChart({
     patU: ISeriesApi<"Line">;
     patL: ISeriesApi<"Line">;
     fibLines: IPriceLine[];
+    srLines: IPriceLine[];
+    fibConnector: ISeriesApi<"Line">;
+    fibBandSeries: ISeriesApi<SeriesType>[];
     patLines: IPriceLine[];
+    boxSeries: ISeriesApi<SeriesType>[];
+    boxPriceLines: IPriceLine[];
+    evolutionPriceLines: IPriceLine[];
+    markerSets: {
+      patterns: SeriesMarker<Time>[]; box: SeriesMarker<Time>[]; evolution: SeriesMarker<Time>[];
+      smaSignal: SeriesMarker<Time>[]; regression: SeriesMarker<Time>[]; fractals: SeriesMarker<Time>[];
+      fibSignal: SeriesMarker<Time>[]; futureLabel: SeriesMarker<Time>[];
+    };
     totalBars: number | null;
     viewKey: string | null;
     sorted: Candle[];
@@ -113,6 +161,18 @@ export function PriceChart({
 
   const latest = useRef({ indicators, chartType, onIndicatorSnapshot, smartPrice, locale });
   latest.current = { indicators, chartType, onIndicatorSnapshot, smartPrice, locale };
+
+  function applyMarkers() {
+    const st = s.current;
+    if (!st) return;
+    st.candle.setMarkers(
+      [
+        ...st.markerSets.patterns, ...st.markerSets.box, ...st.markerSets.evolution,
+        ...st.markerSets.smaSignal, ...st.markerSets.regression, ...st.markerSets.fractals, ...st.markerSets.fibSignal,
+        ...st.markerSets.futureLabel,
+      ].sort((a, b) => (a.time as number) - (b.time as number)),
+    );
+  }
 
   // ---------------------------------------------------------------- mount
   useEffect(() => {
@@ -169,6 +229,10 @@ export function PriceChart({
     const vwapS = chart.addLineSeries({ color: C.vwap, lineWidth: 2, visible: false, ...quiet });
     const patU = chart.addLineSeries({ color: C.pattern, lineWidth: 2, lineStyle: LineStyle.Dashed, visible: false, ...quiet });
     const patL = chart.addLineSeries({ color: C.pattern, lineWidth: 2, lineStyle: LineStyle.Dashed, visible: false, ...quiet });
+    // The swing itself (low<->high) that the Fibonacci levels below are measured from, drawn
+    // right on the candles - same idea as patU/patL above, just for the Fib swing instead of a
+    // chart pattern's boundary.
+    const fibConnector = chart.addLineSeries({ color: C.fib, lineWidth: 2, visible: false, ...quiet });
     // Confidence band: an area fading to fully transparent (never an opaque
     // fill that would blank the grid below the band), lower bound dashed.
     const bandUp = chart.addAreaSeries({
@@ -179,7 +243,11 @@ export function PriceChart({
 
     s.current = {
       chart, candle, line, volume, pred, bandUp, bandLo, sma: smaS, ema: emaS, bbU, bbM, bbL, vwap: vwapS, patU, patL,
-      fibLines: [], patLines: [], totalBars: null, viewKey: null, sorted: [], anchor: null,
+      fibLines: [], srLines: [], fibConnector, fibBandSeries: [], patLines: [], boxSeries: [], boxPriceLines: [], evolutionPriceLines: [],
+      markerSets: {
+        patterns: [], box: [], evolution: [], smaSignal: [], regression: [], fractals: [], fibSignal: [], futureLabel: [],
+      },
+      totalBars: null, viewKey: null, sorted: [], anchor: null,
     };
 
     const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }));
@@ -196,7 +264,6 @@ export function PriceChart({
         return;
       }
       if (st.totalBars !== null) setShowLive(st.totalBars - range.to > 5);
-      if (latest.current.indicators.fibonacci) drawFib();
     });
 
     // Price readout under the cursor, read off the price scale so it always
@@ -240,6 +307,11 @@ export function PriceChart({
     return latest.current.chartType === "line" ? st.line : st.candle;
   }
 
+  // The 61.8%-78.6% band traders watch most closely for a retracement to stall and reverse -
+  // highlighted more strongly than the other bands, same idea as any charting tool's "golden
+  // zone" shading.
+  const FIB_GOLDEN_ZONE: [number, number] = [0.618, 0.786];
+
   function drawFib() {
     const st = s.current;
     if (!st) return;
@@ -253,26 +325,103 @@ export function PriceChart({
       } catch { /* already gone */ }
     }
     st.fibLines = [];
+    st.fibBandSeries.forEach((ser) => {
+      try {
+        st.chart.removeSeries(ser);
+      } catch { /* already gone */ }
+    });
+    st.fibBandSeries = [];
+
     let fib: IndicatorSnapshot["fib"] = null;
     if (latest.current.indicators.fibonacci && st.sorted.length) {
-      const range = st.chart.timeScale().getVisibleLogicalRange();
-      const n = st.sorted.length;
-      const from = Math.max(0, Math.floor(range ? range.from : 0));
-      const to = Math.min(n - 1, Math.ceil(range ? range.to : n - 1));
-      const visible = from <= to ? st.sorted.slice(from, to + 1) : st.sorted;
-      if (visible.length) {
-        const high = Math.max(...visible.map((c) => c.high));
-        const low = Math.min(...visible.map((c) => c.low));
+      // Anchored to the most recent real swing (a confirmed local high/low pair), not to
+      // whatever happens to be in the current zoom/scroll window - otherwise the levels would
+      // jump around on every pan instead of marking an actual price move.
+      const swing = findLastSwing(st.sorted);
+      if (swing) {
+        const { high, low } = swing;
         fib = { high, low };
+        const levelPrice = (lv: number) => high - lv * (high - low);
         st.fibLines = FIB_LEVELS.map((lv) =>
           activeSeries().createPriceLine({
-            price: high - lv * (high - low), color: C.fib, lineWidth: 1, lineStyle: LineStyle.Dotted,
+            price: levelPrice(lv), color: C.fib, lineWidth: 1, lineStyle: LineStyle.Dotted,
             axisLabelVisible: true, title: `${(lv * 100).toFixed(1)}%`,
           }),
         );
+
+        // The swing itself, drawn as a line through its two pivots (in chronological order).
+        const highTime = ts(st.sorted[swing.highIndex].timestamp);
+        const lowTime = ts(st.sorted[swing.lowIndex].timestamp);
+        const swingPts = swing.lowIndex < swing.highIndex
+          ? [{ time: lowTime, value: low }, { time: highTime, value: high }]
+          : [{ time: highTime, value: high }, { time: lowTime, value: low }];
+        st.fibConnector.setData(swingPts);
+        st.fibConnector.applyOptions({ visible: true });
+
+        // A shaded band between every two consecutive levels, from the swing to "now" - the
+        // Golden Zone shaded more strongly than the rest, same visual language as a charting
+        // tool's "golden zone" highlight.
+        const spanStart = Math.min(highTime, lowTime);
+        const spanEnd = ts(st.sorted[st.sorted.length - 1].timestamp);
+        if (spanEnd > spanStart) {
+          for (let i = 0; i < FIB_LEVELS.length - 1; i++) {
+            const a = FIB_LEVELS[i], b = FIB_LEVELS[i + 1];
+            const top = levelPrice(Math.min(a, b));
+            const bottom = levelPrice(Math.max(a, b));
+            const golden = Math.min(a, b) === FIB_GOLDEN_ZONE[0] && Math.max(a, b) === FIB_GOLDEN_ZONE[1];
+            const bandColor = golden ? C.pred : C.fib;
+            const bandAlpha = golden ? 0.28 : 0.1;
+            const band = st.chart.addBaselineSeries({
+              priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+              lineWidth: 1, baseValue: { type: "price", price: bottom },
+              topLineColor: "transparent", topFillColor1: withAlpha(bandColor, bandAlpha),
+              topFillColor2: withAlpha(bandColor, bandAlpha),
+              bottomLineColor: "transparent", bottomFillColor1: "transparent", bottomFillColor2: "transparent",
+            });
+            band.setData([{ time: spanStart as UTCTimestamp, value: top }, { time: spanEnd as UTCTimestamp, value: top }]);
+            st.fibBandSeries.push(band);
+          }
+        }
       }
     }
+    if (!fib) {
+      st.fibConnector.setData([]);
+      st.fibConnector.applyOptions({ visible: false });
+    }
     return fib;
+  }
+
+  // Support/resistance key levels: horizontal lines at clustered fractal-pivot prices. Not
+  // C.up/C.down - those are already the chart's language for live buy/sell direction (candles,
+  // trend markers, entry signals), so reusing them here made these structural levels blend
+  // straight into every other green/red element on the chart. Support yellow, resistance blue -
+  // plus solid vs. dashed - so the two read apart at a glance.
+  function drawLevels() {
+    const st = s.current;
+    if (!st) return;
+    const C = chartColors();
+    for (const l of st.srLines) {
+      try {
+        st.candle.removePriceLine(l);
+      } catch { /* already gone */ }
+      try {
+        st.line.removePriceLine(l);
+      } catch { /* already gone */ }
+    }
+    st.srLines = [];
+    if (!latest.current.indicators.levels || !st.sorted.length) return;
+    const { support, resistance } = supportResistanceLevels(st.sorted, st.sorted[st.sorted.length - 1].close);
+    const series = activeSeries();
+    for (const price of resistance) {
+      st.srLines.push(series.createPriceLine({
+        price, color: C.resistance, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "R",
+      }));
+    }
+    for (const price of support) {
+      st.srLines.push(series.createPriceLine({
+        price, color: C.support, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: "S",
+      }));
+    }
   }
 
   // ---------------------------------------------------------------- data
@@ -308,11 +457,16 @@ export function PriceChart({
     const last = sorted[sorted.length - 1];
     st.anchor = { time: ts(last.timestamp), open: last.open, high: last.high, low: last.low };
 
-    if (predictions.length) {
+    // Drop any forecast point that doesn't land strictly after the anchor (the last real
+    // candle) - lightweight-charts requires strictly ascending time, and a forecast's first step
+    // can coincide with the anchor's own timestamp right at a candle boundary, which would
+    // otherwise crash setData with a duplicate-time assertion.
+    const futurePredictions = predictions.filter((p) => ts(p.timestamp) > ts(last.timestamp));
+    if (futurePredictions.length) {
       const a = { time: ts(last.timestamp), value: last.close };
-      st.pred.setData([a, ...predictions.map((p) => ({ time: ts(p.timestamp), value: p.predicted_price }))]);
-      st.bandUp.setData([a, ...predictions.map((p) => ({ time: ts(p.timestamp), value: p.upper }))]);
-      st.bandLo.setData([a, ...predictions.map((p) => ({ time: ts(p.timestamp), value: p.lower }))]);
+      st.pred.setData([a, ...futurePredictions.map((p) => ({ time: ts(p.timestamp), value: p.predicted_price }))]);
+      st.bandUp.setData([a, ...futurePredictions.map((p) => ({ time: ts(p.timestamp), value: p.upper }))]);
+      st.bandLo.setData([a, ...futurePredictions.map((p) => ({ time: ts(p.timestamp), value: p.lower }))]);
     } else {
       st.pred.setData([]);
       st.bandUp.setData([]);
@@ -339,6 +493,7 @@ export function PriceChart({
   function applyIndicators() {
     const st = s.current;
     if (!st) return;
+    const C = chartColors();
     const ind = latest.current.indicators;
     const sorted = st.sorted;
     const times = sorted.map((c) => ts(c.timestamp));
@@ -362,7 +517,83 @@ export function PriceChart({
     const vw = ind.vwap ? vwap(sorted) : [];
     st.vwap.applyOptions({ visible: !!ind.vwap });
     st.vwap.setData(ind.vwap ? toData(vw) : []);
+
+    // A trend-filtered Bollinger entry signal only means something with both indicators on
+    // (the trend filter needs the SMA, the entry trigger needs the bands) - see
+    // lib/indicators.ts::smaBollingerSignals.
+    st.markerSets.smaSignal = ind.sma && bb
+      ? smaBollingerSignals(sorted.map((c) => c.low), sorted.map((c) => c.high), closes, sma(closes, 20), bb.upper, bb.lower).flatMap(
+          (sig, i) => (sig ? [{
+            time: times[i], position: sig === "buy" ? ("belowBar" as const) : ("aboveBar" as const),
+            color: sig === "buy" ? C.up : C.down, shape: sig === "buy" ? ("arrowUp" as const) : ("arrowDown" as const),
+            text: "SMA+BB",
+          }] : []),
+        )
+      : [];
+
+    // Trend confirmation: three EMAs of different lengths, each one's own rolling
+    // linear-regression slope, marked only where the state *changes* (a fresh confirmation),
+    // not on every candle a trend continues - otherwise it would be marker noise, not a signal.
+    if (ind.regression) {
+      const slopes = [20, 50, 80].map((p) => rollingSlope(ema(closes, p), 7));
+      const trend = confirmedTrend(slopes);
+      st.markerSets.regression = trend.flatMap((state, i) => {
+        if (!state || state === trend[i - 1]) return [];
+        return [{
+          time: times[i], position: state === "up" ? ("belowBar" as const) : ("aboveBar" as const),
+          color: state === "up" ? C.up : C.down, shape: state === "up" ? ("arrowUp" as const) : ("arrowDown" as const),
+          text: "Trend",
+        }];
+      });
+    } else {
+      st.markerSets.regression = [];
+    }
+
+    // Fractal pivots: raw local high/low candle comparison, distinct "square" shape so it
+    // doesn't visually blend with the arrow markers above when both are on.
+    st.markerSets.fractals = ind.fractals
+      ? findFractals(sorted, 2).flatMap((kind, i) => (kind ? [{
+          time: times[i], position: kind === "high" ? ("aboveBar" as const) : ("belowBar" as const),
+          color: kind === "high" ? C.down : C.up, shape: "square" as const, text: "Fractal",
+        }] : []))
+      : [];
+
+    // Fibonacci entry signal: part of the same "Fibonacci" toggle as the levels/bands below, not
+    // a separate indicator - a trend-filtered retracement entry, own EMA-slope trend filter (not
+    // gated on the separate "Trend (regression)" toggle, so it works whenever Fibonacci is on) -
+    // see lib/indicators.ts::fibEntrySignals. Marked only where a fresh signal appears, not on
+    // every candle it remains valid.
+    if (ind.fibonacci) {
+      const slopes = [20, 50, 80].map((p) => rollingSlope(ema(closes, p), 7));
+      const trend = confirmedTrend(slopes);
+      const signals = fibEntrySignals(sorted, trend);
+      st.markerSets.fibSignal = signals.flatMap((sig, i) => {
+        if (!sig || signals[i - 1]) return [];
+        return [{
+          time: times[i], position: sig.side === "long" ? ("belowBar" as const) : ("aboveBar" as const),
+          color: sig.side === "long" ? C.up : C.down, shape: sig.side === "long" ? ("arrowUp" as const) : ("arrowDown" as const),
+          text: "Fib Entry",
+        }];
+      });
+    } else {
+      st.markerSets.fibSignal = [];
+    }
+
+    // Forward outcome: a hindsight diagnostic, not a trading signal - marks candles that were
+    // followed by a significant move, so a threshold choice can be eyeballed on the chart. See
+    // lib/indicators.ts::futurePriceLabels.
+    st.markerSets.futureLabel = ind.futureLabel
+      ? futurePriceLabels(closes).flatMap((label, i) => (label ? [{
+          time: times[i], position: label === "up" ? ("belowBar" as const) : ("aboveBar" as const),
+          color: C.pattern, shape: label === "up" ? ("arrowUp" as const) : ("circle" as const),
+          text: label === "up" ? "Fwd ↑" : "Fwd ↓",
+        }] : []))
+      : [];
+
+    applyMarkers();
+
     const fib = drawFib();
+    drawLevels();
 
     latest.current.onIndicatorSnapshot?.({
       price: closes.at(-1) ?? null,
@@ -392,7 +623,8 @@ export function PriceChart({
     }
     st.patLines = [];
     if (!patterns) {
-      st.candle.setMarkers([]);
+      st.markerSets.patterns = [];
+      applyMarkers();
       st.patU.setData([]);
       st.patL.setData([]);
       st.patU.applyOptions({ visible: false });
@@ -408,11 +640,26 @@ export function PriceChart({
         text: p.name,
       }))
       .sort((a, b) => (a.time as number) - (b.time as number));
-    st.candle.setMarkers(markers);
+    st.markerSets.patterns = markers;
+    applyMarkers();
 
     const top = patterns.geometric;
     const pt = (l: { timestamp: string; price: number }) => ({ time: ts(l.timestamp), value: l.price });
     const byTime = (a: { time: UTCTimestamp }, b: { time: UTCTimestamp }) => a.time - b.time;
+    // A boundary line (triangle/wedge/channel side) stops dead at its last detected pivot
+    // otherwise - extend it forward along its own slope (first pivot -> last pivot) so the
+    // chart shows where the two lines are headed (e.g. a triangle's converging apex), not just
+    // where they've already been. Horizon = how long the line took to form, a common and simple
+    // projection convention, capped by that same span so it never runs away unbounded.
+    const projectSlope = (points: { time: UTCTimestamp; value: number }[]) => {
+      if (points.length < 2) return points;
+      const first = points[0], last = points[points.length - 1];
+      const span = (last.time as number) - (first.time as number);
+      if (span <= 0) return points;
+      const slope = (last.value - first.value) / span;
+      const projTime = (last.time as number) + span;
+      return [...points, { time: projTime as UTCTimestamp, value: last.value + slope * span }];
+    };
     if (!top) {
       st.patU.setData([]);
       st.patL.setData([]);
@@ -420,8 +667,8 @@ export function PriceChart({
       st.patL.applyOptions({ visible: false });
     } else if (TWO_LINE_PATTERNS.has(top.name)) {
       const split = top.upper_count ?? Math.ceil(top.levels.length / 2);
-      st.patU.setData(top.levels.slice(0, split).map(pt).sort(byTime));
-      st.patL.setData(top.levels.slice(split).map(pt).sort(byTime));
+      st.patU.setData(projectSlope(top.levels.slice(0, split).map(pt).sort(byTime)));
+      st.patL.setData(projectSlope(top.levels.slice(split).map(pt).sort(byTime)));
       st.patU.applyOptions({ visible: true });
       st.patL.applyOptions({ visible: true });
     } else {
@@ -437,6 +684,143 @@ export function PriceChart({
       st.patLines.push(st.candle.createPriceLine({ price: top.target, color: top.direction === "bearish" ? C.down : C.up, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: patterns.targetLabel }));
     }
   }, [patterns]);
+
+  // ---------------------------------------------------------------- box breakout
+  // Each box is a Baseline series whose base is the floor and whose line is
+  // the ceiling, so the area between them fills; a separate line marks the
+  // floor. Green/red: broke out up/down (grey: without volume, no trade),
+  // accent: still active. Entries/exits are markers, the open trade's
+  // entry/stop/target are price lines.
+  useEffect(() => {
+    const st = s.current;
+    if (!st) return;
+    const C = chartColors();
+    const priceSeries = activeSeries();
+
+    st.boxSeries.forEach((ser) => {
+      try {
+        st.chart.removeSeries(ser);
+      } catch { /* already gone */ }
+    });
+    st.boxSeries = [];
+    for (const l of st.boxPriceLines) {
+      try {
+        priceSeries.removePriceLine(l);
+      } catch { /* already gone */ }
+    }
+    st.boxPriceLines = [];
+
+    if (!box) {
+      st.markerSets.box = [];
+      applyMarkers();
+      return;
+    }
+
+    const hidden = { priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+    box.boxes.slice(-BOX_MAX_DRAWN).forEach((b) => {
+      const color = b.breakout == null ? C.pred
+        : !b.volume_confirmed ? C.text
+        : b.breakout === "up" ? (box.significantUp === false ? C.text : C.up)
+        : (box.significantDown === false ? C.text : C.down);
+      const from = ts(b.start_time);
+      const to = ts(b.breakout ? b.end_time : box.lastTime);
+      if (to <= from) return;
+      const fill = st.chart.addBaselineSeries({
+        ...hidden, lineWidth: 1, baseValue: { type: "price", price: b.floor },
+        topLineColor: color, topFillColor1: withAlpha(color, 0.16), topFillColor2: withAlpha(color, 0.16),
+        bottomLineColor: color, bottomFillColor1: "transparent", bottomFillColor2: "transparent",
+      });
+      fill.setData([{ time: from, value: b.ceiling }, { time: to, value: b.ceiling }]);
+      const floorLine = st.chart.addLineSeries({ ...hidden, color, lineWidth: 1 });
+      floorLine.setData([{ time: from, value: b.floor }, { time: to, value: b.floor }]);
+      st.boxSeries.push(fill, floorLine);
+    });
+
+    const markers: SeriesMarker<Time>[] = [];
+    box.trades.forEach((tr) => {
+      const long = tr.side === "long";
+      markers.push({
+        time: ts(tr.entry_time), position: long ? "belowBar" : "aboveBar",
+        color: long ? C.up : C.down, shape: long ? "arrowUp" : "arrowDown", text: long ? "Long" : "Short",
+      });
+      if (tr.exit_time) {
+        markers.push({
+          time: ts(tr.exit_time), position: long ? "aboveBar" : "belowBar",
+          color: tr.return_pct > 0 ? C.up : C.down, shape: "circle",
+          text: `${BOX_EXIT_LABEL[tr.exit_reason ?? ""] ?? "Exit"} ${tr.return_pct > 0 ? "+" : ""}${tr.return_pct.toFixed(1)}%`,
+        });
+      }
+    });
+    st.markerSets.box = markers.sort((a, b) => (a.time as number) - (b.time as number));
+    applyMarkers();
+
+    const open = box.openTrade;
+    if (open) {
+      const line = (price: number, color: string, title: string) =>
+        st.boxPriceLines.push(priceSeries.createPriceLine({ price, color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title }));
+      line(open.entry_price, C.pred, t("dashboard.box.entryTitle"));
+      line(open.stop, C.down, t("dashboard.box.stopTitle"));
+      if (open.target != null) line(open.target, C.up, t("dashboard.box.targetTitle"));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [box, chartType]);
+
+  // ---------------------------------------------------------------- evolution fund trades
+  // When the fund opened/closed a position - never a predicted price line. A still-open
+  // position gets a live dashed price line at its entry, labeled with its running % (entry vs
+  // the latest close), so "how is the current trade doing" is visible at a glance, not just
+  // each closed trade's final result.
+  useEffect(() => {
+    const st = s.current;
+    if (!st) return;
+    const C = chartColors();
+    const priceSeries = activeSeries();
+
+    for (const l of st.evolutionPriceLines) {
+      try {
+        priceSeries.removePriceLine(l);
+      } catch { /* already gone */ }
+    }
+    st.evolutionPriceLines = [];
+
+    if (!evolutionTrades) {
+      st.markerSets.evolution = [];
+      applyMarkers();
+      return;
+    }
+
+    const markers: SeriesMarker<Time>[] = [];
+    evolutionTrades.trades.forEach((tr, i) => {
+      const long = tr.side === "long";
+      const open = !tr.exit_time;
+      const livePct = open && evolutionTrades.lastClose != null
+        ? (evolutionTrades.lastClose / tr.entry_price - 1) * (long ? 1 : -1) * 100 : null;
+      // Entries are always blue (side is already shown by the arrow direction) and numbered -
+      // several can land close together, the number says which is which. The invested amount
+      // is what makes "how big a bet was this" visible, not just the direction.
+      markers.push({
+        time: ts(tr.entry_time), position: long ? "belowBar" : "aboveBar",
+        color: C.sky, shape: long ? "arrowUp" : "arrowDown",
+        text: `#${i + 1} ${long ? "Long" : "Short"} ${fmtEur(tr.entry_amount)}${livePct != null ? ` ${livePct >= 0 ? "+" : ""}${livePct.toFixed(1)}%` : ""}`,
+      });
+      if (tr.exit_time && tr.return_pct != null) {
+        markers.push({
+          time: ts(tr.exit_time), position: long ? "aboveBar" : "belowBar",
+          color: tr.return_pct > 0 ? C.up : C.down, shape: "circle",
+          text: `Exit ${tr.return_pct > 0 ? "+" : ""}${tr.return_pct.toFixed(1)}%`,
+        });
+      } else if (open) {
+        const color = livePct == null ? C.pred : livePct >= 0 ? C.up : C.down;
+        st.evolutionPriceLines.push(priceSeries.createPriceLine({
+          price: tr.entry_price, color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true,
+          title: `#${i + 1} ${fmtEur(tr.entry_amount)}${livePct != null ? ` ${livePct >= 0 ? "+" : ""}${livePct.toFixed(1)}%` : ""}`,
+        }));
+      }
+    });
+    st.markerSets.evolution = markers.sort((a, b) => (a.time as number) - (b.time as number));
+    applyMarkers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [evolutionTrades, chartType]);
 
   // ---------------------------------------------------------------- live tick
   useImperativeHandle(handleRef, () => ({

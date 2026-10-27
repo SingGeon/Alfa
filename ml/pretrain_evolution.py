@@ -73,10 +73,10 @@ def pretrain(coin_id: str, symbol: str, interval: str, candles: int, compare: bo
 
     if compare:
         t1 = time.time()
-        base = evolution.EvolutionaryForecaster().fit(df)
+        base = evolution.EvolutionaryForecaster(interval=interval).fit(df)
         print(f"  price-only population lived in {time.time() - t1:.0f}s", flush=True)
     t1 = time.time()
-    ev = evolution.EvolutionaryForecaster().fit(full)
+    ev = evolution.EvolutionaryForecaster(interval=interval).fit(full)
     key = f"{coin_id}_{interval}"
     evolution.save_state(key, ev)
     d = ev.diagnostics(ev.t_last)
@@ -98,7 +98,6 @@ def pretrain(coin_id: str, symbol: str, interval: str, candles: int, compare: bo
         causes = Counter(x["cause"] for x in ev.graveyard)
         print(f"  money (from {m['since'][:10]}, {m['start']:.0f} EUR each): fund {m['fund']:.2f} EUR "
               f"({m['fund_return_pct']:+.1f}%, {m['fund_trades']} trades, {m['fund_fees']:.2f} EUR fees) | "
-              f"buy & hold {m['buy_hold']:.2f} EUR ({m['buy_hold_return_pct']:+.1f}%) | "
               f"richest alive #{m['richest']['id']} {m['richest']['money']:.2f} EUR", flush=True)
         print(f"  deaths by cause: {dict(causes)}", flush=True)
     return ev

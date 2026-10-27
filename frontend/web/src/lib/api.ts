@@ -136,9 +136,169 @@ export interface GeometricPattern {
   target?: number | null;
   confirmed?: boolean;
 }
+// A signal's statistical validation (ml/signal_validation.py - ANOVA + chi-squared against
+// future returns): does it actually carry real predictive information, or could it be chance?
+export interface ValidationResult {
+  n_signal: number;
+  n_baseline: number;
+  mean_return_signal_pct: number | null;
+  mean_return_baseline_pct: number | null;
+  anova_p: number | null;
+  chi2_p: number | null;
+  significant: boolean;
+  low_sample: boolean;
+}
 export interface PatternsResponse {
   candlestick: CandlePattern[];
   geometric: GeometricPattern[];
+  validation?: Record<string, ValidationResult>;
+}
+
+// ---- box breakout strategy (ml/box_breakout.py)
+
+export interface BoxSettings {
+  lookback: number;
+  padding: number;
+  vol_ma: number;
+  rr: number;
+  exit_mode: "rr" | "trail";
+  breakout_buffer_pct: number;
+  stop_buffer_pct: number;
+  fee_pct: number;
+  max_box_pct: number;
+  reverse_on_opposite: boolean;
+  stop_atr_mult?: number | null;
+  breakeven_at_r?: number | null;
+}
+export interface StrategyBox {
+  start: number;
+  established: number;
+  end: number;
+  ceiling: number;
+  floor: number;
+  breakout: "up" | "down" | null;
+  breakout_bar: number | null;
+  volume_confirmed: boolean | null;
+  start_time: string;
+  established_time: string;
+  end_time: string;
+  breakout_time: string | null;
+}
+export interface StrategyTrade {
+  side: "long" | "short";
+  entry_bar: number;
+  entry_price: number;
+  stop: number;
+  initial_stop: number;
+  target: number | null;
+  exit_bar: number | null;
+  exit_price: number | null;
+  exit_reason: "stop" | "target" | "trail_stop" | "reverse" | null;
+  stop_moves: { bar: number; stop: number; time: string }[];
+  entry_time: string;
+  exit_time: string | null;
+  return_pct: number;
+}
+export interface BoxBreakoutSegment {
+  from_bar: number;
+  to_bar: number;
+  from_time: string;
+  to_time: string;
+  settings: BoxSettings | null;
+  train_return_pct: number | null;
+  train_trades: number;
+  candidates: number;
+}
+export interface BoxBreakoutStats {
+  trades: number;
+  open_trades: number;
+  longs: number;
+  shorts: number;
+  win_rate_pct: number | null;
+  total_return_pct: number;
+  avg_trade_pct: number | null;
+  avg_r: number | null;
+  profit_factor: number | null;
+  max_drawdown_pct: number;
+  cagr_pct: number | null;
+  sortino: number | null;
+  calmar: number | null;
+  sqn: number | null;
+  low_sample: boolean;
+  bars: number;
+  from: string | null;
+  to: string | null;
+}
+export interface ExitVariantResult extends BoxBreakoutStats {
+  equity_curve: number[];
+}
+export interface BoxBreakoutExitComparison {
+  fixed_target: ExitVariantResult;
+  atr_stop: ExitVariantResult;
+  trailing_stop: ExitVariantResult;
+  breakeven_dynamic: ExitVariantResult;
+}
+export interface BoxBreakoutBoxStats {
+  boxes: number;
+  avg_height_pct: number | null;
+  avg_duration_bars: number | null;
+  breakouts_up: number;
+  breakouts_down: number;
+  volume_confirmed_pct: number | null;
+  follow_through_pct: number | null;
+}
+export interface BoxBreakoutResponse {
+  coin_id: string;
+  interval: string;
+  mode: "adaptive";
+  train_bars: number;
+  reopt_every: number;
+  current: BoxBreakoutSegment;
+  next_reopt_in_bars: number;
+  segments: BoxBreakoutSegment[];
+  boxes: StrategyBox[];
+  trades: StrategyTrade[];
+  stats: BoxBreakoutStats;
+  box_stats: BoxBreakoutBoxStats;
+  active_box: StrategyBox | null;
+  open_trade: StrategyTrade | null;
+  last_close: number;
+  last_time: string;
+  oos_from: string;
+  signal_validation?: { up: ValidationResult; down: ValidationResult };
+  exit_comparison?: BoxBreakoutExitComparison;
+}
+
+// ---- box breakout Monte Carlo robustness (evaluation/box_breakout_robustness.py, ml/monte_carlo.py)
+
+export interface MonteCarloMetricSpread {
+  median: number | null;
+  min: number | null;
+  max: number | null;
+  n: number;
+}
+export interface MonteCarloSummary {
+  available: boolean;
+  interval: string;
+  n_runs?: number;
+  computed_at?: string;
+  compute_seconds?: number;
+  sigma_pct?: number;
+  settings?: BoxSettings;
+  base?: { total_return_pct: number; max_drawdown_pct: number; trades: number };
+  total_return_pct?: MonteCarloMetricSpread;
+  max_drawdown_pct?: MonteCarloMetricSpread;
+  sortino?: MonteCarloMetricSpread;
+  calmar?: MonteCarloMetricSpread;
+  bimodal_drawdown?: boolean;
+  png_url?: string;
+}
+
+// ---- model skill validation (evaluation/evaluator.py::validate_model_skill)
+
+export interface ModelValidation extends ValidationResult {
+  model: string;
+  interval: string | null;
 }
 
 export type AssetType = "crypto" | "stock";
@@ -274,6 +434,10 @@ export interface AliveOrganism {
   window: number;
   patience: number;
   ridge_alpha: number;
+  pred_w: number;
+  pattern_w: number;
+  box_w: number;
+  news_w: number;
 }
 
 export interface DeathRow {
@@ -287,7 +451,7 @@ export interface DeathRow {
   peak_money: number;
   trades: number;
   fees_paid: number;
-  tax_paid: number;
+  fines_paid: number;
   wins: number;
   losses: number;
   combos: number;
@@ -302,11 +466,15 @@ export interface DeathRow {
   sentiment_source: string | null;
   growth_pct_per_100: number;
   killing_prediction: { h: number; predicted_pct: number; actual_pct: number } | null;
-  last_48: { fees: number; taxes: number; trading_loss: number; worst_candle_pct: number } | null;
+  last_48: { fees: number; fines: number; trading_loss: number; worst_candle_pct: number } | null;
   boldness: number;
   temperament: number;
   news_sensitivity: number;
   window: number;
+  pred_w: number;
+  pattern_w: number;
+  box_w: number;
+  news_w: number;
   patience: number;
   ridge_alpha: number;
 }
@@ -348,13 +516,16 @@ export interface EvolutionTimelinePoint {
   alive: number;
   mood: number;
   fund: number | null;
-  buy_hold: number | null;
   richest: number | null;
   boldness: number;
   temperament: number;
   news_sensitivity: number;
   window: number;
   patience: number;
+  pred_w: number;
+  pattern_w: number;
+  box_w: number;
+  news_w: number;
   avg_generation: number;
   shares: Record<string, number>;
 }
@@ -377,6 +548,10 @@ export interface EvolutionGeneration {
   news_sensitivity: number;
   window: number;
   patience: number;
+  pred_w: number;
+  pattern_w: number;
+  box_w: number;
+  news_w: number;
 }
 export interface TrackRecordRow {
   h: number;
@@ -407,12 +582,12 @@ export interface EvolutionMoney {
   since: string;
   fund: number;
   fund_return_pct: number;
+  avg_daily_return_pct: number;
+  target_daily_pct: number;
   fund_peak: number;
   fund_trades: number;
   fund_fees: number;
   fund_position: number;
-  buy_hold: number;
-  buy_hold_return_pct: number;
   richest: { id: number; age: number; money: number } | null;
   total_alive_money: number;
   long: number;
@@ -432,6 +607,33 @@ export interface EvolutionReport {
   alive: AliveOrganism[];
 }
 
+// ---- evolution fund trades (ml/evolution.py's own entry/exit log - same
+// marker language as Box Breakout, not a predicted-price line)
+
+export interface EvolutionTrade {
+  side: "long" | "short";
+  entry_bar: number;
+  entry_time: string;
+  entry_price: number;
+  entry_amount: number;
+  exit_bar: number | null;
+  exit_time: string | null;
+  exit_price: number | null;
+  return_pct: number | null;
+  /** Drawn by evaluation.trade_watch the instant this leg opened/closed; null for trades from
+   * before that feature existed, or (exit) while the trade is still open. */
+  entry_snapshot_url: string | null;
+  exit_snapshot_url: string | null;
+}
+export interface EvolutionTradesResponse {
+  coin_id: string;
+  interval: string;
+  trades: EvolutionTrade[];
+  open_trade: EvolutionTrade | null;
+  last_close: number | null;
+  last_time: string | null;
+}
+
 // ---- strategy fund (ml/strategy_fund.py)
 
 export interface FundNow {
@@ -447,26 +649,25 @@ export interface FundMoneyStat {
   cagr_pct: number;
   max_dd_pct: number;
   sharpe: number;
+  sortino: number;
+  calmar: number;
+  low_sample: boolean;
   trades: number;
   fees: number;
   exposure_pct: number;
 }
 export interface FundPeriod {
   fund: FundMoneyStat;
-  buy_hold: FundMoneyStat;
 }
 export interface FundYear {
   year: number;
   fund_pct: number;
   fund_dd: number;
-  buy_hold_pct: number;
-  buy_hold_dd: number;
   trades: number;
 }
 export interface FundCurvePoint {
   time: string;
   fund: number;
-  buy_hold: number;
   position: number;
 }
 export interface FundGenePoint {

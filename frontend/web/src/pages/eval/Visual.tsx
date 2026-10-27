@@ -61,10 +61,12 @@ export default function Visual() {
     refetchInterval: 60_000,
   });
 
-  // Resolve defaults once lists arrive (same rules as before: prefer sklearn-tuned, newest day).
+  // Resolve defaults once lists arrive (prefer sklearn-legacy, newest day). "sklearn-tuned" no
+  // longer logs new forecasts here (it trades instead - see /trades), so it's never the
+  // default even though it may still have older rows to browse.
   const modelList = models.data?.models ?? [];
   const dayList = days.data?.days ?? [];
-  const model = modelList.includes(st.model) ? st.model : modelList.includes("sklearn-tuned") ? "sklearn-tuned" : modelList[0] ?? "";
+  const model = modelList.includes(st.model) ? st.model : modelList.includes("sklearn-legacy") ? "sklearn-legacy" : modelList[0] ?? "";
   const day = dayList.some((d) => d.day === st.day) ? st.day : dayList[0]?.day ?? "";
 
   useEffect(() => {
@@ -222,6 +224,7 @@ export default function Visual() {
           <div className="num mb-3 text-[13px] font-semibold text-accent">
             {st.view === "model" ? `${model} · ${st.interval || t("visual.allIntervals")}` : day ? fmtUtcDay(day, locale) : ""}
           </div>
+          {st.view === "model" && model === "sklearn-tuned" && <p className="mb-4 text-[12.5px] text-faint">{t("eval.tunedNote")}</p>}
           {sel.data ? <StatTiles s={sel.data.overall} /> : selEnabled ? <Skeleton className="h-24" /> : <StatTiles s={null} />}
           {breakdown.rows.length > 0 && (
             <div className="mt-4 overflow-x-auto">

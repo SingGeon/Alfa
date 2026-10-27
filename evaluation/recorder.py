@@ -47,7 +47,14 @@ def _history(df) -> list[dict]:
 
 
 def record_prediction(result: dict, df, sentiment_avg: float, diagnostics: dict | None = None) -> int | None:
-    """Log the prediction and, if it's a new one, draw its visual snapshot."""
+    """Log the prediction and, if it's a new one, draw its visual snapshot.
+
+    Skips "tuned" (ml.evolution): that model's job is deciding *when* to trade, not
+    forecasting a price, so scoring/snapshotting it as a forecast would misrepresent it - its
+    trade entries/exits get their own snapshot instead (evaluation.trade_watch), drawn the
+    instant they happen, not logged here."""
+    if result.get("model_variant") == "tuned":
+        return None
     try:
         try:
             signal = _signal(result, df, sentiment_avg)

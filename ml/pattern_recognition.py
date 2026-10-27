@@ -724,3 +724,49 @@ def analyze(candles: list[dict], lang: str = "en") -> dict:
         "candlestick": detect_candlestick_patterns(candles, lang),
         "geometric": detect_geometric_patterns(candles, lang),
     }
+
+
+def validate_candlestick_patterns(candles: list[dict], horizon: int = 24) -> dict:
+    """Does each candlestick pattern type actually predict anything? (see
+    ml.signal_validation - Chapter 7's statistical-validation discipline).
+
+    Scans the *entire* history (not detect_candlestick_patterns'
+    RECENT_WINDOW tail - that's "what's live right now", this needs every
+    past occurrence to have enough samples for a p-value), re-running the
+    same per-candle detectors, then scores each pattern name's future
+    `horizon`-bar return against the rest of history with
+    signal_validation.validate_signal.
+
+    Returns {pattern_name: validate_signal() dict}, one entry per pattern
+    type that ever fired in this history."""
+    from ml.signal_validation import label_future_return, validate_signal
+
+    df = candles_to_dataframe(candles).reset_index()
+    if df.empty:
+        return {}
+    closes = df["close"].to_numpy(dtype=float)
+
+    hits: dict[str, list[int]] = {}
+    for i in range(len(df)):
+        row = (df.at[i, "open"], df.at[i, "high"], df.at[i, "low"], df.at[i, "close"])
+        match = None
+        if i >= 2:
+            c1 = tuple(df.loc[i - 2, ["open", "high", "low", "close"]])
+            c2 = tuple(df.loc[i - 1, ["open", "high", "low", "close"]])
+            match = _three_candle_pattern(c1, c2, row)
+        if not match and i >= 1:
+            prev = tuple(df.loc[i - 1, ["open", "high", "low", "close"]])
+            match = _two_candle_pattern(prev, row)
+        if not match:
+            match = _single_candle_pattern(*row, trend=_trend_before(closes, i))
+        if match:
+            hits.setdefault(match["name"], []).append(i)
+
+    future = label_future_return(df["close"], horizon)
+    n = len(df)
+    results = {}
+    for name, indices in hits.items():
+        signal = np.zeros(n, dtype=bool)
+        signal[indices] = True
+        results[name] = validate_signal(signal, future)
+    return results

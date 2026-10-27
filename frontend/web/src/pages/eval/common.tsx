@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import type { ReactNode } from "react";
 import { NavLink } from "react-router";
-import { CalendarDays, Images, Table2 } from "lucide-react";
+import { ArrowLeftRight, CalendarDays, Images, Table2 } from "lucide-react";
 import type { EvalStat } from "../../lib/api";
 import { fmtPct } from "../../lib/format";
 import { useI18n } from "../../i18n";
@@ -12,6 +12,7 @@ export function EvalTabs() {
     { to: "/evaluation", label: t("ui.eval.tabPredictions"), Icon: Table2 },
     { to: "/history", label: t("nav.history"), Icon: CalendarDays },
     { to: "/visual", label: t("nav.visual"), Icon: Images },
+    { to: "/trades", label: t("nav.trades"), Icon: ArrowLeftRight },
   ];
   return (
     <nav className="mb-8 flex gap-1.5 overflow-x-auto" aria-label="Evaluation">

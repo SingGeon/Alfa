@@ -161,15 +161,16 @@ def test_money_is_life_long_gains_when_price_rises():
     a.position, b.position = 1.0, 0.0
     move = np.exp(ev.logc[t] - ev.logc[t - 1]) - 1
     before = (a.energy, b.energy)
+    b_pnl_before = b.trading_pnl
     a_id, b_id = a.id, b.id
     ev._step(t)
     a = next((o for o in ev.alive if o.id == a_id), a)
     b = next((o for o in ev.alive if o.id == b_id), b)
-    # a held a full long: its money moved with the price; b only paid rent
-    # (plus any fee if it traded at the end of the step).
+    # a held a full long: its money moved with the price; b stayed flat and
+    # the move cost it nothing (no flat daily tax any more - only a losing
+    # day is fined, see test_loss_fine_only_on_losing_days_not_flat_ones).
     assert a.trading_pnl != 0.0 or move == 0
-    assert np.isclose(b.trading_pnl, b.trading_pnl)  # flat: no pnl from the move
-    assert b.tax_paid > 0
+    assert b.trading_pnl == b_pnl_before   # flat: this candle's move added no pnl
 
 
 def test_trading_costs_a_fee():
@@ -178,11 +179,10 @@ def test_trading_costs_a_fee():
     ev = EvolutionaryForecaster().fit(_frame())
     org = ev.alive[0]
     org.energy, org.position, org.fees_paid = 100.0, 0.0, 0.0
-    big = np.full(len(evolution.HORIZONS), 0.05) * np.array(evolution.HORIZONS)  # +5% per candle expected
-    ev._trade(org, big, patience=1.0)
+    ev._trade(org, 1.0)
     assert org.position == 1.0
     assert np.isclose(org.fees_paid, 100.0 * evolution.FEE)
-    ev._trade(org, np.zeros(len(evolution.HORIZONS)), patience=1.0)   # no edge: out of the market
+    ev._trade(org, 0.0)
     assert org.position == 0.0
 
 
@@ -190,16 +190,14 @@ def test_patience_keeps_it_out_of_small_edges():
     from ml import evolution
 
     ev = EvolutionaryForecaster().fit(_frame())
-    # Expected move over the 24-candle horizon = 1 round trip of fees.
-    tiny = np.full(len(evolution.HORIZONS), 2 * evolution.FEE / evolution.H_MAX) * np.array(evolution.HORIZONS)
-    tiny = tiny * 1.01
-    assert ev._target_position(tiny, patience=0.5) != 0.0
-    assert ev._target_position(tiny, patience=2.0) == 0.0
-    # Already long and the forecast still points up: it keeps holding,
-    # even though the edge alone wouldn't pay for entering.
-    assert ev._target_position(tiny, patience=2.0, current=0.5) > 0.0
-    # The forecast turned down but not enough to pay for a flip: it leaves.
-    assert ev._target_position(-tiny, patience=2.0, current=0.5) == 0.0
+    org = ev.alive[0]
+    org.pred_w, org.pattern_w, org.box_w, org.news_w = 1.0, 0.0, 0.0, 0.0
+    t = ev.t_last
+    tiny = 2 * evolution.FEE * 1.01   # just over 1 round trip of fees, as a 1-step forecast
+    org.patience = 0.5
+    assert ev._target_position(tiny, org, t) != 0.0
+    org.patience = 2.0
+    assert ev._target_position(tiny, org, t) == 0.0
 
 
 def test_bankrupt_dies_and_slowest_is_outcompeted():
@@ -208,7 +206,7 @@ def test_bankrupt_dies_and_slowest_is_outcompeted():
     ev = EvolutionaryForecaster().fit(_frame())
     ev.pending.clear()
     t = ev.t_last
-    while t % evolution.CULL_EVERY:
+    while t % ev.cull_every:
         t -= 1
     poor = ev.alive[0]
     poor.energy, poor.position = 5.0, 0.0
@@ -232,35 +230,59 @@ def test_death_causes_from_money():
     org.trace = [(-1.0, 0.1, 0.07, 50.0)] * 20
     assert ev._death_record(org, ev.t_last)["cause"] == "bad_trades"
     org.trace = [(0.0, 0.0, 0.07, 50.0)] * 20
-    assert ev._death_record(org, ev.t_last)["cause"] == "taxes"
+    assert ev._death_record(org, ev.t_last)["cause"] == "fines"
     org.culled = True
     assert ev._death_record(org, ev.t_last)["cause"] == "outcompeted"
 
 
-def test_fund_and_buy_hold_are_tracked():
-    ev = EvolutionaryForecaster().fit(_frame())
-    m = ev.diagnostics(ev.t_last)["money"]
-    assert m["start"] == 100.0 and m["currency"] == "EUR"
-    df = _frame()
-    start = pd.Timestamp(m["since"])
-    expected = 100.0 * df["close"].iloc[-1] / df.loc[start, "close"]
-    assert abs(m["buy_hold"] - expected) < 0.01  # rounded to cents
-
-
-
-def test_daily_tax_is_per_day_and_higher_when_idle():
+def test_fund_is_tracked():
     from ml import evolution
 
-    ev = EvolutionaryForecaster().fit(_frame())          # hourly candles
-    assert abs(ev.tax_per_candle - evolution.DAILY_TAX / 24) < 1e-12
+    ev = EvolutionaryForecaster().fit(_frame())
+    m = ev.diagnostics(ev.t_last)["money"]
+    assert m["start"] == evolution.START_MONEY and m["currency"] == "EUR"
+    assert isinstance(m["fund"], float)
+    assert "buy_hold" not in m
+
+
+def test_fines_target_losing_and_fully_idle_days_only():
+    """Once a day (scaled to real time): a losing day pays a fine proportional to the loss; a
+    day spent entirely out of the market (zero engagement) pays a small separate idle fine -
+    closes the "never trade, immortal, fitness 0 forever" loophole; a day spent holding any
+    position, even an exactly flat one, pays nothing at all."""
+    import math
+
+    from ml import evolution
+
+    ev = EvolutionaryForecaster().fit(_frame())
     ev.pending.clear()
     t = ev.t_last
-    a, b = ev.alive[:2]
-    for o in (a, b):
-        o.energy, o.tax_paid, o.fees_last = 100.0, 0.0, 0.0
-    a.position, b.position = 0.5, 0.0
+    a, b, c = ev.alive[:3]
+    a.born_at = b.born_at = c.born_at = t - ev.candles_per_day   # force a day boundary this step
+    a.fees_last = b.fees_last = c.fees_last = 0.0
+    a.engagement_sum = b.engagement_sum = c.engagement_sum = 0.0
+    a.engagement_n = b.engagement_n = c.engagement_n = 0
+
+    move = math.exp(ev.logc[t] - ev.logc[t - 1]) - 1
+
+    a.energy_1d_ago, a.energy, a.position = 100.0, 90.0, 0.0   # already down 10% today, out now
+    c.energy_1d_ago = c.energy = 100.0                          # fully idle all day
+    c.position = 0.0
+
+    b.energy, b.position = 100.0, 0.3                           # engaged, but an exactly flat day
+    b.energy_1d_ago = b.energy + b.energy * b.position * move   # makes today's daily_pct == 0
+
+    # Section 5 of _step always retargets and re-trades everyone for the *next* candle, which
+    # would charge its own fee unrelated to the fine logic under test here - disable it so the
+    # only thing moving anyone's energy is this candle's pnl plus (maybe) a fine.
+    ev._trade = lambda acct, target: None
+
     ev._step(t)
-    assert abs(b.tax_paid - evolution.IDLE_TAX_MULT * a.tax_paid) < 1e-12
+
+    assert a.energy <= 85.5     # fined ~5% of its money (LOSS_FINE_RATE x 10% loss)
+    assert c.energy < 100.0     # the idle fine actually costs it something now...
+    assert c.energy >= 100.0 * (1 - 2 * evolution.IDLE_FINE_RATE)   # ...but only a small amount
+    assert abs(b.energy - (100.0 + 100.0 * 0.3 * move)) < 1e-6  # no fine: just this candle's pnl
 
 
 def test_near_constant_input_cannot_blow_up_the_forecast():

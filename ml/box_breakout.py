@@ -47,7 +47,7 @@ ended yet) would make the latest box/signal flicker until it closes.
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -74,6 +74,10 @@ class BoxSettings:
     fee_pct: float = 0.1              # per side (entry and exit)
     max_box_pct: float = 0.0          # skip boxes taller than this % of the floor (0 = no limit)
     reverse_on_opposite: bool = True  # opposite breakout closes and reverses the trade
+    stop_atr_mult: float | None = None    # if set, stop = entry -/+ this many ATR(14), instead of
+                                           # stop_buffer_pct beyond the box's opposite side
+    breakeven_at_r: float | None = None   # if set, move the stop to entry price once the trade is this
+                                           # many R (risk multiples) in profit - independent of exit_mode
 
     def validate(self) -> None:
         if not 2 <= self.lookback <= 500:
@@ -91,6 +95,10 @@ class BoxSettings:
                 raise ValueError(f"{name} must be between 0 and 10")
         if not 0 <= self.max_box_pct <= 1000:
             raise ValueError("max_box_pct must be between 0 and 1000")
+        if self.stop_atr_mult is not None and not 0.1 <= self.stop_atr_mult <= 20:
+            raise ValueError("stop_atr_mult must be between 0.1 and 20")
+        if self.breakeven_at_r is not None and not 0.1 <= self.breakeven_at_r <= 20:
+            raise ValueError("breakeven_at_r must be between 0.1 and 20")
 
 
 @dataclass
@@ -167,10 +175,19 @@ def detect_boxes(df: pd.DataFrame, s: BoxSettings) -> list[Box]:
     return boxes
 
 
+def _atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.rolling(period).mean().to_numpy()
+
+
 def simulate(df: pd.DataFrame, boxes: list[Box], s: BoxSettings) -> list[Trade]:
     open_, high, low = df["open"].to_numpy(float), df["high"].to_numpy(float), df["low"].to_numpy(float)
     close, volume = df["close"].to_numpy(float), df["volume"].to_numpy(float)
     vol_ma = pd.Series(volume).rolling(s.vol_ma).mean().to_numpy()
+    atr = _atr(df) if s.stop_atr_mult is not None else None
     for b in boxes:
         if b.breakout_bar is not None:
             v = vol_ma[b.breakout_bar]
@@ -190,19 +207,29 @@ def simulate(df: pd.DataFrame, boxes: list[Box], s: BoxSettings) -> list[Trade]:
             if stop_hit:
                 gapped = open_[i] <= pos.stop if long else open_[i] >= pos.stop
                 pos.exit_bar, pos.exit_price = i, float(open_[i] if gapped else pos.stop)
-                pos.exit_reason = "trail_stop" if pos.stop_moves else "stop"
+                pos.exit_reason = f"{pos.stop_moves[-1]['reason']}_stop" if pos.stop_moves else "stop"
             elif target_hit:
                 gapped = open_[i] >= pos.target if long else open_[i] <= pos.target
                 pos.exit_bar, pos.exit_price, pos.exit_reason = i, float(open_[i] if gapped else pos.target), "target"
             if pos.exit_bar is not None:
                 pos = None
-            elif s.exit_mode == "trail" and i in established:
-                # Trail to the newly formed box's far side, only in the trade's favor.
-                b = established[i]
-                new_stop = b.floor * (1 - stop_mult) if long else b.ceiling * (1 + stop_mult)
-                if (long and new_stop > pos.stop) or (not long and new_stop < pos.stop):
-                    pos.stop = float(new_stop)
-                    pos.stop_moves.append({"bar": i, "stop": pos.stop})
+            else:
+                if s.exit_mode == "trail" and i in established:
+                    # Trail to the newly formed box's far side, only in the trade's favor.
+                    b = established[i]
+                    new_stop = b.floor * (1 - stop_mult) if long else b.ceiling * (1 + stop_mult)
+                    if (long and new_stop > pos.stop) or (not long and new_stop < pos.stop):
+                        pos.stop = float(new_stop)
+                        pos.stop_moves.append({"bar": i, "stop": pos.stop, "reason": "trail"})
+                if s.breakeven_at_r is not None:
+                    # Once unrealized profit reaches breakeven_at_r x the initial risk, move the
+                    # stop to entry price (never backward) - independent of exit_mode/trailing.
+                    r_now = (close[i] - pos.entry_price) / pos.risk if long else (pos.entry_price - close[i]) / pos.risk
+                    if r_now >= s.breakeven_at_r:
+                        be_stop = pos.entry_price
+                        if (long and be_stop > pos.stop) or (not long and be_stop < pos.stop):
+                            pos.stop = float(be_stop)
+                            pos.stop_moves.append({"bar": i, "stop": pos.stop, "reason": "breakeven"})
 
         b = breakouts.get(i)
         if b is None or not b.volume_confirmed:
@@ -216,12 +243,13 @@ def simulate(df: pd.DataFrame, boxes: list[Box], s: BoxSettings) -> list[Trade]:
             pos.exit_bar, pos.exit_price, pos.exit_reason = i, float(close[i]), "reverse"
             pos = None
         entry = float(close[i])
+        use_atr = atr is not None and not math.isnan(atr[i]) and atr[i] > 0
         if side == "long":
-            stop = b.floor * (1 - stop_mult)
+            stop = entry - s.stop_atr_mult * atr[i] if use_atr else b.floor * (1 - stop_mult)
             target = entry + s.rr * (entry - stop) if s.exit_mode == "rr" else None
             valid = stop < entry
         else:
-            stop = b.ceiling * (1 + stop_mult)
+            stop = entry + s.stop_atr_mult * atr[i] if use_atr else b.ceiling * (1 + stop_mult)
             target = entry - s.rr * (stop - entry) if s.exit_mode == "rr" else None
             valid = stop > entry and (target is None or target > 0)
         if valid:
@@ -237,6 +265,18 @@ def trade_return(t: Trade, fee_pct: float, mark_price: float | None = None) -> f
     return gross - 2 * fee_pct / 100
 
 
+def equity_curve(trades: list[Trade], fee_pct: float) -> np.ndarray:
+    """Cumulative equity (starting at 1.0) after each closed trade, in trade order - what
+    summarize() derives its drawdown from, and what ml.monte_carlo's fan chart plots."""
+    closed = [t for t in trades if t.exit_bar is not None]
+    rets = np.array([trade_return(t, fee_pct) for t in closed])
+    return np.cumprod(1 + rets) if len(rets) else np.array([1.0])
+
+
+LOW_SAMPLE_TRADES = 30   # below this, Sortino/Calmar/SQN read as noise, not evidence (Ch. 9's "9 trades
+                         # isn't statistically significant" warning) - a book-shaped threshold, not an exact rule
+
+
 def summarize(df: pd.DataFrame, trades: list[Trade], s: BoxSettings) -> dict:
     closed = [t for t in trades if t.exit_bar is not None]
     rets = np.array([trade_return(t, s.fee_pct) for t in closed])
@@ -247,8 +287,16 @@ def summarize(df: pd.DataFrame, trades: list[Trade], s: BoxSettings) -> dict:
     equity = np.cumprod(1 + rets) if len(rets) else np.array([1.0])
     peak = np.maximum.accumulate(np.concatenate([[1.0], equity]))
     drawdown = 1 - np.concatenate([[1.0], equity]) / peak
+    max_dd_pct = round(float(drawdown.max()) * 100, 2)
     wins, losses = rets[rets > 0], rets[rets <= 0]
-    close = df["close"].to_numpy(float)
+
+    downside = losses[losses < 0]
+    sortino = round(float(rets.mean() / downside.std()), 2) if len(downside) > 1 and downside.std() > 0 else None
+    sqn = round(float(math.sqrt(len(rets)) * rets.mean() / rets.std()), 2) if len(rets) > 1 and rets.std() > 0 else None
+    years = (df.index[-1] - df.index[0]).days / 365.25 if len(df) > 1 else 0.0
+    cagr_pct = round((float(equity[-1]) ** (1 / years) - 1) * 100, 2) if years > 0 and equity[-1] > 0 else None
+    calmar = round(cagr_pct / max_dd_pct, 2) if cagr_pct is not None and max_dd_pct > 0 else None
+
     return {k: (float(v) if isinstance(v, np.floating) else v) for k, v in {
         "trades": len(closed),
         "open_trades": len(trades) - len(closed),
@@ -259,12 +307,54 @@ def summarize(df: pd.DataFrame, trades: list[Trade], s: BoxSettings) -> dict:
         "avg_trade_pct": round(rets.mean() * 100, 3) if len(rets) else None,
         "avg_r": round(r_multiples.mean(), 2) if len(r_multiples) else None,
         "profit_factor": round(wins.sum() / -losses.sum(), 2) if len(losses) and losses.sum() < 0 else None,
-        "max_drawdown_pct": round(drawdown.max() * 100, 2),
-        "buy_hold_pct": round((close[-1] / close[0] - 1) * 100, 2) if len(close) else None,
+        "max_drawdown_pct": max_dd_pct,
+        "cagr_pct": cagr_pct,
+        "sortino": sortino,
+        "calmar": calmar,
+        "sqn": sqn,
+        "low_sample": len(closed) < LOW_SAMPLE_TRADES,
         "bars": len(df),
         "from": df.index[0].isoformat() if len(df) else None,
         "to": df.index[-1].isoformat() if len(df) else None,
     }.items()}
+
+
+def validate_breakout_signal(df: pd.DataFrame, boxes: list[Box], horizon: int = 24) -> dict:
+    """Does a volume-confirmed breakout actually predict a continuation in its own direction?
+    (see ml.signal_validation - Ch. 7's statistical-validation discipline). `boxes` must already
+    have gone through simulate() (that's what sets volume_confirmed). Scores the "up" and "down"
+    breakout signals separately against each bar's next `horizon`-bar return."""
+    from ml.signal_validation import label_future_return, validate_signal
+
+    n = len(df)
+    up, down = np.zeros(n, dtype=bool), np.zeros(n, dtype=bool)
+    for b in boxes:
+        if b.breakout_bar is None or not b.volume_confirmed:
+            continue
+        (up if b.breakout == "up" else down)[b.breakout_bar] = True
+
+    future = label_future_return(df["close"], horizon)
+    return {"up": validate_signal(up, future), "down": validate_signal(down, future)}
+
+
+def compare_exit_management(df: pd.DataFrame, boxes: list[Box], base: BoxSettings) -> dict:
+    """Same entries (the same `boxes`, so the same signal/trade dates), four different exit-
+    management approaches - mirrors the book's Ch. 9 case studies (fixed target -> ATR-based stop
+    -> trailing stop -> breakeven-dynamic), to see how much of a result is trade management rather
+    than the signal itself. Returns {variant_name: summarize() dict}."""
+    variants = {
+        "fixed_target": replace(base, exit_mode="rr", stop_atr_mult=None, breakeven_at_r=None),
+        "atr_stop": replace(base, exit_mode="rr", stop_atr_mult=base.stop_atr_mult or 2.0, breakeven_at_r=None),
+        "trailing_stop": replace(base, exit_mode="trail", stop_atr_mult=None, breakeven_at_r=None),
+        "breakeven_dynamic": replace(base, exit_mode="rr", stop_atr_mult=None, breakeven_at_r=base.breakeven_at_r or 1.0),
+    }
+    out = {}
+    for name, settings in variants.items():
+        settings.validate()
+        trades = simulate(df, boxes, settings)
+        out[name] = summarize(df, trades, settings)
+        out[name]["equity_curve"] = equity_curve(trades, settings.fee_pct).tolist()
+    return out
 
 
 def run(candles: list[dict], interval: str, settings: BoxSettings | None = None, now: datetime | None = None) -> dict:
@@ -339,10 +429,13 @@ def _score(df: pd.DataFrame, s: BoxSettings) -> tuple[float, int]:
     return float(sum(math.log(max(1e-9, 1 + trade_return(t, s.fee_pct))) for t in trades)), len(trades)
 
 
-def choose_settings(train: pd.DataFrame) -> tuple[BoxSettings | None, dict]:
-    """Best PARAM_GRID entry on `train`, or None (stand aside) if none made money."""
+def choose_settings(train: pd.DataFrame, param_grid: list[dict] | None = None) -> tuple[BoxSettings | None, dict]:
+    """Best `param_grid` entry (default: PARAM_GRID) on `train`, or None (stand aside) if none
+    made money. A caller living at a different native candle cadence than this grid's bars were
+    tuned for (ml/evolution.py, for 15m) can pass a rescaled grid instead."""
+    grid = param_grid if param_grid is not None else PARAM_GRID
     best, best_score, best_n = None, 0.0, 0
-    for params in PARAM_GRID:
+    for params in grid:
         s = BoxSettings(**params)
         if len(train) < s.lookback + s.padding + 2:
             continue
@@ -350,7 +443,7 @@ def choose_settings(train: pd.DataFrame) -> tuple[BoxSettings | None, dict]:
         if n >= MIN_TRAIN_TRADES and score > best_score:
             best, best_score, best_n = s, score, n
     return best, {"train_return_pct": round((math.exp(best_score) - 1) * 100, 2) if best else None,
-                  "train_trades": best_n, "candidates": len(PARAM_GRID)}
+                  "train_trades": best_n, "candidates": len(grid)}
 
 
 def box_stats(df: pd.DataFrame, boxes: list[Box]) -> dict:
@@ -380,21 +473,30 @@ def box_stats(df: pd.DataFrame, boxes: list[Box]) -> dict:
     }
 
 
-def run_adaptive(candles: list[dict], interval: str, now: datetime | None = None) -> dict:
-    """Walk-forward Box Breakout: settings re-chosen from past data every
-    REOPT_EVERY bars; boxes, trades and stats only from out-of-sample bars."""
+def run_adaptive(candles: list[dict], interval: str, now: datetime | None = None,
+                  train_bars: int | None = None, reopt_every: int | None = None,
+                  param_grid: list[dict] | None = None) -> dict:
+    """Walk-forward Box Breakout: settings re-chosen from past data every `reopt_every` bars
+    (default: REOPT_EVERY); boxes, trades and stats only from out-of-sample bars.
+
+    `train_bars`/`reopt_every`/`param_grid` default to the module constants (TRAIN_BARS/
+    REOPT_EVERY/PARAM_GRID), which are plain candle counts never scaled by `interval` - fine at
+    the cadence they were tuned for, but a caller living at a much finer native cadence (ml/
+    evolution.py, for 15m) can pass real-time-equivalent rescaled values instead."""
+    train_bars = TRAIN_BARS if train_bars is None else train_bars
+    reopt_every = REOPT_EVERY if reopt_every is None else reopt_every
     df = candles_to_dataframe(closed_candles(candles, interval, now))
     n = len(df)
-    train_bars = min(TRAIN_BARS, n // 2)
+    train_bars = min(train_bars, n // 2)
     if n < 200:
         raise ValueError(f"Need at least 200 closed candles, have {n}")
     ts = [t.isoformat() for t in df.index]
     last_close = float(df["close"].iloc[-1])
 
     segments, boxes, trades = [], [], []
-    for start in range(train_bars, n, REOPT_EVERY):
-        end = min(start + REOPT_EVERY, n)
-        s, info = choose_settings(df.iloc[start - train_bars:start])
+    for start in range(train_bars, n, reopt_every):
+        end = min(start + reopt_every, n)
+        s, info = choose_settings(df.iloc[start - train_bars:start], param_grid)
         segments.append({"from_bar": start, "to_bar": end - 1, "from_time": ts[start], "to_time": ts[end - 1],
                          "settings": asdict(s) if s else None, **info})
         # Run on everything up to now (boxes need their history, exits their
@@ -444,9 +546,9 @@ def run_adaptive(candles: list[dict], interval: str, now: datetime | None = None
     return {
         "mode": "adaptive",
         "train_bars": train_bars,
-        "reopt_every": REOPT_EVERY,
+        "reopt_every": reopt_every,
         "current": {k: v for k, v in current.items() if not k.startswith("_")},
-        "next_reopt_in_bars": current["from_bar"] + REOPT_EVERY - (n - 1),
+        "next_reopt_in_bars": current["from_bar"] + reopt_every - (n - 1),
         "segments": [{k: v for k, v in seg.items() if not k.startswith("_")} for seg in segments],
         "boxes": [box_json(b) for b in boxes],
         "trades": [trade_json(t) for t in trades],

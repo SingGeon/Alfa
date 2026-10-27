@@ -1,3 +1,6 @@
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
 import pytest
 
 import config
@@ -269,6 +272,70 @@ def test_box_breakout_endpoint_errors(client, seeded):
     assert client.get("/api/box-breakout?interval=1d").status_code == 409  # no 1d candles seeded
 
 
+def _trending_candles(n_cycles=40, interval_hours=1):
+    """Ranges that repeatedly break out upward and keep going (same shape as
+    tests/test_box_breakout.py's _trending_boxes), timestamped to end safely before "now" so
+    run_adaptive's "current" segment picks real (non-None) settings instead of standing aside."""
+    rng = np.random.default_rng(0)
+    rows, price = [], 100.0
+    for _ in range(n_cycles):
+        for _ in range(25):
+            c = price + rng.uniform(-0.5, 0.5)
+            rows.append((price, price + 0.8, price - 0.8, c, 100))
+        for k in range(10):
+            o = price
+            price *= 1.01
+            rows.append((o, price + 0.2, o - 0.1, price, 400 if k == 0 else 100))
+    start = datetime.now(timezone.utc) - timedelta(hours=(len(rows) + 2) * interval_hours)
+    return [
+        {"timestamp": start + timedelta(hours=i * interval_hours), "open": o, "high": h, "low": l, "close": c, "volume": v}
+        for i, (o, h, l, c, v) in enumerate(rows)
+    ]
+
+
+def test_box_breakout_endpoint_includes_signal_validation_and_exit_comparison(client):
+    repository.save_candles("ethereum", "1h", _trending_candles())
+    resp = client.get("/api/box-breakout?interval=1h")
+    assert resp.status_code == 200
+    body = resp.json
+    assert body["current"]["settings"] is not None   # a real edge here, so validation must have run
+    assert set(body["signal_validation"]) == {"up", "down"}
+    assert set(body["exit_comparison"]) == {"fixed_target", "atr_stop", "trailing_stop", "breakeven_dynamic"}
+    for variant in body["exit_comparison"].values():
+        assert "sortino" in variant and "calmar" in variant
+
+
+def test_patterns_endpoint_includes_validation(client, seeded):
+    resp = client.get("/api/patterns?interval=1h")
+    assert resp.status_code == 200
+    assert isinstance(resp.json["validation"], dict)
+
+
+def test_box_breakout_monte_carlo_unavailable_by_default(client, monkeypatch, tmp_path):
+    from evaluation import box_breakout_robustness
+
+    monkeypatch.setattr(box_breakout_robustness, "STATE_DIR", tmp_path)
+    resp = client.get("/api/box-breakout/monte-carlo?interval=1h")
+    assert resp.status_code == 200
+    assert resp.json == {"available": False, "interval": "1h"}
+
+
+def test_box_breakout_monte_carlo_served_once_computed(client, monkeypatch):
+    from evaluation import box_breakout_robustness
+
+    fake_report = {"interval": "1h", "computed_at": "2026-01-01T00:00:00+00:00", "bimodal_drawdown": False}
+    monkeypatch.setattr(box_breakout_robustness, "load", lambda interval: fake_report if interval == "1h" else None)
+    resp = client.get("/api/box-breakout/monte-carlo?interval=1h")
+    assert resp.status_code == 200
+    assert resp.json["available"] is True
+    assert resp.json["png_url"] == "/api/box-breakout/monte-carlo/1h.png"
+    assert resp.json["bimodal_drawdown"] is False
+
+
+def test_box_breakout_monte_carlo_png_404_when_missing(client):
+    assert client.get("/api/box-breakout/monte-carlo/1h.png").status_code == 404
+
+
 def test_population_endpoints(client, synthetic_candles):
     repository.save_candles("ethereum", "1h", synthetic_candles(700))
     assert client.get("/api/evolution/report?interval=1h").status_code == 404  # not born yet
@@ -286,6 +353,9 @@ def test_population_endpoints(client, synthetic_candles):
         assert org["organism"]["id"] == oid and org["organism"]["dead"] is True
     assert client.get("/api/evolution/deaths?interval=1h&cause=nope").status_code == 400
     assert client.get("/api/evolution/organism/999999?interval=1h").status_code == 404
+    trades = client.get("/api/evolution/trades?interval=1h")
+    assert trades.status_code == 200
+    assert {"coin_id", "interval", "trades", "open_trade", "last_close", "last_time"} <= set(trades.json)
 
 
 def test_strategy_fund_endpoint(client, monkeypatch, tmp_path):

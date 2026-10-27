@@ -1,15 +1,17 @@
 import clsx from "clsx";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { keepPreviousData, useQueries, useQuery } from "@tanstack/react-query";
-import { Activity, ArrowRight, CandlestickChart, ChevronDown, Fuel, ImageIcon, Layers, LineChart, Lightbulb, Radar, ScanSearch, Target, X } from "lucide-react";
+import { Activity, ArrowRight, CandlestickChart, ChevronDown, Dna, Fuel, ImageIcon, Layers, LineChart, Lightbulb, Package, Radar, ScanSearch, Target, X } from "lucide-react";
 import {
   apiGet,
   ApiError,
   type AccuracyResponse,
+  type BoxBreakoutResponse,
   type Candle,
   type CurrentPrice,
   type EvolutionReport,
+  type EvolutionTradesResponse,
   type FundReport,
   type L2Chain,
   type NewsItem,
@@ -22,7 +24,7 @@ import {
   type SignalStat,
 } from "../lib/api";
 import { computeSignal, FIB_LEVELS, type SignalSummary } from "../lib/indicators";
-import { dirText, fmtCompactUsd, fmtDateTime, fmtElapsed, fmtMoney, qualityText } from "../lib/format";
+import { dirText, fmtCompactUsd, fmtDateTime, fmtElapsed, fmtMoney, fmtPct, qualityText } from "../lib/format";
 import { useI18n, type TFn } from "../i18n";
 import { PriceChart, type IndicatorKey, type Indicators, type IndicatorSnapshot, type PriceChartHandle } from "../components/PriceChart";
 import { AccuracyChart } from "../components/AccuracyChart";
@@ -48,8 +50,12 @@ const INDICATORS: { key: IndicatorKey; label: string; color: string }[] = [
   { key: "sma", label: "SMA 20", color: "var(--color-sky)" },
   { key: "ema", label: "EMA 20", color: "var(--color-rose)" },
   { key: "bollinger", label: "Bollinger", color: "var(--color-dim)" },
-  { key: "fibonacci", label: "Fibonacci", color: "var(--color-faint)" },
+  { key: "fibonacci", label: "Fibonacci", color: "var(--color-warn)" },
   { key: "vwap", label: "VWAP", color: "var(--color-violet)" },
+  { key: "regression", label: "Trend (regression)", color: "var(--color-up)" },
+  { key: "fractals", label: "Fractals", color: "var(--color-dim)" },
+  { key: "levels", label: "Support/Resistance", color: "linear-gradient(90deg, var(--color-sky), var(--color-warn))" },
+  { key: "futureLabel", label: "Forward Outcome", color: "var(--color-violet)" },
 ];
 
 const REFRESH = 30_000;
@@ -66,8 +72,13 @@ export default function Dashboard() {
   const [useSentiment, setUseSentiment] = useState(true);
   const [variant, setVariant] = useState<Variant>("legacy");
   const [chartType, setChartType] = useState<"candles" | "line">("candles");
-  const [indicators, setIndicators] = useState<Indicators>({ sma: false, ema: false, bollinger: false, fibonacci: false, vwap: false });
+  const [indicators, setIndicators] = useState<Indicators>({
+    sma: false, ema: false, bollinger: false, fibonacci: false, vwap: false, regression: false, fractals: false, levels: false,
+    futureLabel: false,
+  });
   const [showPatterns, setShowPatterns] = useState(false);
+  const [showBox, setShowBox] = useState(false);
+  const [showEvolutionTrades, setShowEvolutionTrades] = useState(false);
   const [explainOpen, setExplainOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<IndicatorSnapshot | null>(null);
   const [dismissedError, setDismissedError] = useState<string | null>(null);
@@ -146,6 +157,24 @@ export default function Dashboard() {
     enabled: showPatterns,
     refetchInterval: REFRESH,
   });
+  const boxBreakout = useQuery({
+    queryKey: ["box-breakout", interval],
+    queryFn: () => apiGet<BoxBreakoutResponse>("/api/box-breakout", { interval }),
+    enabled: showBox,
+    retry: false,
+    refetchInterval: REFRESH,
+  });
+  // The evolution ("tuned") model's job is deciding when to trade, not forecasting a price -
+  // its chart always shows entry/exit, never the predicted-price line, with no manual toggle
+  // needed (see memory feedback-chart-entry-exit-not-prediction).
+  const isTunedModel = variant === "tuned";
+  const evolutionTradesQuery = useQuery({
+    queryKey: ["evolution-trades", interval],
+    queryFn: () => apiGet<EvolutionTradesResponse>("/api/evolution/trades", { interval }),
+    enabled: showEvolutionTrades || isTunedModel,
+    retry: false,
+    refetchInterval: REFRESH,
+  });
   const pins = useQuery({ queryKey: ["pins"], queryFn: () => apiGet<{ pins: Pin[] }>("/api/scout/pins"), refetchInterval: REFRESH });
   const pinQuotes = useQueries({
     queries: (pins.data?.pins ?? []).map((p) => ({
@@ -186,6 +215,21 @@ export default function Dashboard() {
       targetLabel: t("dashboard.pattern.targetTitle"),
     };
   }, [showPatterns, patterns.data, t]);
+
+  const boxOverlay = useMemo(() => {
+    if (!showBox || !boxBreakout.data) return null;
+    const d = boxBreakout.data;
+    return {
+      boxes: d.boxes, trades: d.trades, openTrade: d.open_trade, lastTime: d.last_time,
+      significantUp: d.signal_validation?.up.significant ?? null,
+      significantDown: d.signal_validation?.down.significant ?? null,
+    };
+  }, [showBox, boxBreakout.data]);
+
+  const evolutionTradesOverlay = useMemo(() => {
+    if (!(showEvolutionTrades || isTunedModel) || !evolutionTradesQuery.data) return null;
+    return { trades: evolutionTradesQuery.data.trades, lastClose: evolutionTradesQuery.data.last_close };
+  }, [showEvolutionTrades, isTunedModel, evolutionTradesQuery.data]);
 
   const errorMsg = (() => {
     if (history.error) return t("dashboard.error.priceHistory", { msg: history.error.message });
@@ -329,6 +373,28 @@ export default function Dashboard() {
                 <ScanSearch className="size-3.5" />
                 <span className="hidden sm:inline">{t("dashboard.chart.patternsLabel")}</span>
               </Button>
+              <Button
+                size="sm"
+                variant={showBox ? "outline" : "ghost"}
+                className={clsx(showBox && "!border-accent-hi/50 !text-accent-hi")}
+                onClick={() => setShowBox((v) => !v)}
+                aria-pressed={showBox}
+              >
+                <Package className="size-3.5" />
+                <span className="hidden sm:inline">{t("dashboard.chart.boxLabel")}</span>
+              </Button>
+              <Button
+                size="sm"
+                variant={showEvolutionTrades || isTunedModel ? "outline" : "ghost"}
+                className={clsx((showEvolutionTrades || isTunedModel) && "!border-accent-hi/50 !text-accent-hi", isTunedModel && "opacity-80")}
+                onClick={() => !isTunedModel && setShowEvolutionTrades((v) => !v)}
+                disabled={isTunedModel}
+                aria-pressed={showEvolutionTrades || isTunedModel}
+                title={isTunedModel ? t("dashboard.chart.evolutionAlwaysOn") : undefined}
+              >
+                <Dna className="size-3.5" />
+                <span className="hidden sm:inline">{t("dashboard.chart.evolutionLabel")}</span>
+              </Button>
               <Button size="sm" variant={explainOpen ? "outline" : "ghost"} onClick={() => setExplainOpen((v) => !v)} aria-pressed={explainOpen}>
                 <Lightbulb className="size-3.5" />
                 <span className="hidden xl:inline">{t("dashboard.chart.explainBtn")}</span>
@@ -346,16 +412,22 @@ export default function Dashboard() {
             </div>
           )}
 
-          {showPatterns && patterns.data && <PatternAlert data={patterns.data} t={t} />}
+          {explainOpen && showPatterns && patterns.data && <PatternAlert data={patterns.data} t={t} />}
+
+          {showBox && (
+            <BoxPanel data={boxBreakout.data} error={boxBreakout.error?.message} explainOpen={explainOpen} showBox={showBox} />
+          )}
 
           {/* chart */}
           <div className="relative h-[440px] sm:h-[520px] xl:h-[580px]">
             <PriceChart
               candles={candles ?? []}
-              predictions={prediction?.predictions ?? []}
+              predictions={isTunedModel ? [] : (prediction?.predictions ?? [])}
               chartType={chartType}
               indicators={indicators}
               patterns={patternOverlay}
+              box={boxOverlay}
+              evolutionTrades={evolutionTradesOverlay}
               viewKey={viewKey}
               fitAll={range !== null}
               onIndicatorSnapshot={setSnapshot}
@@ -406,9 +478,13 @@ export default function Dashboard() {
               items={[
                 { color: "var(--color-up)", label: t("common.legend.up") },
                 { color: "var(--color-down)", label: t("common.legend.down") },
-                { color: "var(--color-accent)", label: t("common.legend.pred") },
-                { color: "var(--color-accent)", label: t("common.legend.band"), soft: true },
+                ...(!isTunedModel ? [
+                  { color: "var(--color-accent)", label: t("common.legend.pred") },
+                  { color: "var(--color-accent)", label: t("common.legend.band"), soft: true },
+                ] : []),
                 ...(showPatterns && patternOverlay?.geometric ? [{ color: "var(--color-violet)", label: t("dashboard.legend.pattern"), dashed: true }] : []),
+                ...(showBox && boxOverlay ? [{ color: "var(--color-accent-hi)", label: t("dashboard.legend.box") }] : []),
+                ...(evolutionTradesOverlay ? [{ color: "var(--color-violet)", label: t("dashboard.legend.evolution") }] : []),
               ]}
             />
           </div>
@@ -633,7 +709,10 @@ function IndicatorMenu({ value, onChange, count }: { value: Indicators; onChange
                 onChange={(e) => onChange({ ...value, [ind.key]: e.target.checked })}
                 className="size-3.5 accent-[var(--color-accent)]"
               />
-              <span className="w-3.5 border-t-2" style={{ borderColor: ind.color }} />
+              <span
+                className="w-3.5 border-t-2"
+                style={ind.color.startsWith("linear-gradient") ? { borderImage: `${ind.color} 1` } : { borderColor: ind.color }}
+              />
               {ind.label}
             </label>
           ))}
@@ -651,17 +730,28 @@ function PatternAlert({ data, t }: { data: PatternsResponse; t: TFn }) {
   if (!top && !candleTypes.length) return null;
   const dirTone = (d: string) => (d === "bullish" ? "up" : d === "bearish" ? "down" : "neutral") as "up" | "down" | "neutral";
   const dirLabel = (d: string) => t(d === "bullish" ? "dashboard.pattern.dirBullish" : d === "bearish" ? "dashboard.pattern.dirBearish" : "dashboard.pattern.dirNeutral");
-  const Item = ({ p }: { p: { name: string; direction: string; note: string; target?: number | null; confirmed?: boolean } }) => (
-    <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-[13px]">
-      <Badge tone={dirTone(p.direction)}>{dirLabel(p.direction)}</Badge>
-      <span className="font-medium text-bone">
-        {p.name}
-        {p.confirmed === false && <span className="text-faint"> {t("dashboard.pattern.forming")}</span>}
-      </span>
-      <span className="text-dim">{p.note}</span>
-      {p.target != null && <span className="num text-accent">{t("dashboard.pattern.target", { price: fmtMoney(p.target) })}</span>}
-    </div>
-  );
+  const Item = ({ p }: { p: { name: string; direction: string; note: string; target?: number | null; confirmed?: boolean } }) => {
+    const v = data.validation?.[p.name];
+    return (
+      <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1 text-[13px]">
+        <Badge tone={dirTone(p.direction)}>{dirLabel(p.direction)}</Badge>
+        <span className="font-medium text-bone">
+          {p.name}
+          {p.confirmed === false && <span className="text-faint"> {t("dashboard.pattern.forming")}</span>}
+        </span>
+        {v && !v.low_sample && (
+          <span
+            title={t("dashboard.box.validationStats", { n: v.n_signal, p: [v.anova_p, v.chi2_p].filter((x): x is number => x != null).length ? Math.min(...[v.anova_p, v.chi2_p].filter((x): x is number => x != null)).toFixed(3) : "—" })}
+            className={clsx("rounded-full px-1.5 py-0.5 text-[10px] font-medium", v.significant ? "bg-up/15 text-up" : "bg-line text-faint")}
+          >
+            {t(v.significant ? "dashboard.pattern.validated" : "dashboard.pattern.notSignificant")}
+          </span>
+        )}
+        <span className="text-dim">{p.note}</span>
+        {p.target != null && <span className="num text-accent">{t("dashboard.pattern.target", { price: fmtMoney(p.target) })}</span>}
+      </div>
+    );
+  };
   return (
     <div className="max-h-56 space-y-2 overflow-y-auto border-b border-line border-l-2 border-l-violet/60 bg-violet/[0.04] px-4 py-3 animate-fade sm:px-5">
       {top && <Item p={top} />}
@@ -671,6 +761,154 @@ function PatternAlert({ data, t }: { data: PatternsResponse; t: TFn }) {
           {candleTypes.map((p) => <Item key={p.name} p={p} />)}
         </>
       )}
+    </div>
+  );
+}
+
+/** Renders a translated string's `<b>...</b>` markup as real bold spans (never raw HTML). */
+function boldify(text: string): ReactNode[] {
+  return text.split(/<b>(.*?)<\/b>/g).map((part, i) => (i % 2 === 1 ? <b key={i}>{part}</b> : part));
+}
+
+function BoxPanel({
+  data,
+  error,
+  explainOpen,
+  showBox,
+}: {
+  data?: BoxBreakoutResponse;
+  error?: string;
+  explainOpen: boolean;
+  showBox: boolean;
+}) {
+  const { t } = useI18n();
+
+  const choice = useMemo(() => {
+    if (!data) return null;
+    const cur = data.current;
+    const s = cur.settings;
+    const next = t("dashboard.box.nextCheck", { n: Math.max(1, data.next_reopt_in_bars) });
+    if (!s) {
+      return (
+        <>
+          <b>{t("dashboard.box.standingAside")}</b> {t("dashboard.box.standingAsideWhy", { n: data.train_bars })} {next}
+        </>
+      );
+    }
+    const exit = s.exit_mode === "trail" ? t("dashboard.box.exitTrailShort") : t("dashboard.box.exitRrShort", { rr: s.rr });
+    return (
+      <>
+        {boldify(t("dashboard.box.chosen", { x: s.lookback, y: s.padding, exit }))}{" "}
+        {t("dashboard.box.chosenWhy", { n: data.train_bars, ret: fmtPct(cur.train_return_pct), trades: cur.train_trades, candidates: cur.candidates })}{" "}
+        {next}
+      </>
+    );
+  }, [data, t]);
+
+  const statusLines = useMemo(() => {
+    if (!data) return [];
+    const lines: ReactNode[] = [];
+    const open = data.open_trade;
+    if (open) {
+      lines.push(
+        boldify(
+          t(open.side === "long" ? "dashboard.box.openLong" : "dashboard.box.openShort", {
+            entry: fmtMoney(open.entry_price),
+            stop: fmtMoney(open.stop),
+            target: open.target != null ? fmtMoney(open.target) : t("dashboard.box.trailing"),
+            pnl: fmtPct(open.return_pct),
+          }),
+        ),
+      );
+    }
+    const box = data.active_box;
+    if (box) lines.push(t("dashboard.box.activeBox", { floor: fmtMoney(box.floor), ceiling: fmtMoney(box.ceiling) }));
+    else if (!open) lines.push(t("dashboard.box.noBox"));
+    return lines;
+  }, [data, t]);
+
+  if (error) {
+    return (
+      <div className="border-b border-line border-l-2 border-l-accent-hi/60 bg-accent-hi/[0.04] px-4 py-3 text-[13px] text-faint animate-fade sm:px-5">
+        {error}
+      </div>
+    );
+  }
+  if (!data) {
+    return (
+      <div className="space-y-2 border-b border-line px-4 py-3 sm:px-5">
+        {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-4" />)}
+      </div>
+    );
+  }
+
+  const st = data.stats;
+  const bs = data.box_stats;
+  const traded = data.segments.filter((seg) => seg.settings).length;
+  const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(1)}%`);
+  const tone = (v: number) => (v > 0 ? "up" : v < 0 ? "down" : undefined) as "up" | "down" | undefined;
+
+  const Cell = ({ label, value, tone: cls }: { label: string; value: ReactNode; tone?: "up" | "down" }) => (
+    <div className="bg-panel/90 px-4 py-3">
+      <div className="text-[11px] text-faint">{label}</div>
+      <div className={clsx("num mt-1 text-[15px] font-medium", cls === "up" ? "text-up" : cls === "down" ? "text-down" : "text-bone")}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div className="border-b border-line bg-raised/40 px-4 py-4 animate-fade sm:px-5">
+      {explainOpen && showBox && (
+        <>
+          <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+            <span className="text-[14px] font-semibold text-bone">{t("dashboard.box.title")}</span>
+            <span className="text-xs text-faint">{t("dashboard.box.subtitle")}</span>
+          </div>
+          <div className="mt-3 flex items-center gap-1.5 text-[13px] font-medium text-bone">{t("dashboard.box.howTitle")}</div>
+          <ol className="mt-2 list-decimal space-y-1.5 pl-5 text-[12.5px] leading-relaxed text-dim">
+          {(["how1", "how2", "how3", "how4", "how5"] as const).map((k) => (
+            <li key={k}>{t(`dashboard.box.${k}`)}</li>
+          ))}
+          </ol>
+          <p className="mt-3 rounded-xl border border-line bg-panel px-3 py-2 text-[13px] leading-relaxed text-dim">{choice}</p>
+          <div className="mt-3 space-y-1 text-[13px] text-dim">
+            {statusLines.map((line, i) => <div key={i}>{line}</div>)}
+          </div>
+
+          <div className="eyebrow mt-4">{t("dashboard.box.tradeStatsHeading")}</div>
+          <div className="mt-2 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-4">
+            <Cell label={t("dashboard.box.statTrades")} value={`${st.trades}${st.open_trades ? ` (+${st.open_trades})` : ""}`} />
+            <Cell label={t("dashboard.box.statWinRate")} value={st.win_rate_pct == null ? "—" : `${st.win_rate_pct.toFixed(1)}%`} />
+            <Cell label={t("dashboard.box.statReturn")} value={fmtPct(st.total_return_pct)} tone={tone(st.total_return_pct)} />
+            <Cell label={t("dashboard.box.statProfitFactor")} value={st.profit_factor == null ? "—" : st.profit_factor.toFixed(2)} />
+            <Cell label={t("dashboard.box.statAvgR")} value={st.avg_r == null ? "—" : `${st.avg_r.toFixed(2)}R`} />
+            <Cell
+              label={t("dashboard.box.statDrawdown")}
+              value={st.max_drawdown_pct ? `-${st.max_drawdown_pct.toFixed(2)}%` : "0%"}
+              tone={st.max_drawdown_pct ? "down" : undefined}
+            />
+            <Cell label={t("dashboard.box.statSortino")} value={st.sortino == null ? "—" : st.sortino.toFixed(2)} tone={st.sortino == null ? undefined : tone(st.sortino)} />
+            <Cell label={t("dashboard.box.statCalmar")} value={st.calmar == null ? "—" : st.calmar.toFixed(2)} tone={st.calmar == null ? undefined : tone(st.calmar)} />
+            <Cell label={t("dashboard.box.statSqn")} value={st.sqn == null ? "—" : st.sqn.toFixed(2)} />
+          </div>
+          {st.low_sample && <p className="mt-2 text-[12px] text-warn">{t("dashboard.box.lowSample")}</p>}
+
+          <div className="eyebrow mt-4">{t("dashboard.box.boxStatsHeading")}</div>
+          <div className="mt-2 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-4">
+            <Cell label={t("dashboard.box.statBoxes")} value={bs.boxes} />
+            <Cell label={t("dashboard.box.statHeight")} value={pct(bs.avg_height_pct)} />
+            <Cell
+              label={t("dashboard.box.statDuration")}
+              value={bs.avg_duration_bars == null ? "—" : t("dashboard.box.candles", { n: Math.round(bs.avg_duration_bars) })}
+            />
+            <Cell label={t("dashboard.box.statUpDown")} value={`${bs.breakouts_up} / ${bs.breakouts_down}`} />
+            <Cell label={t("dashboard.box.statVolume")} value={pct(bs.volume_confirmed_pct)} />
+            <Cell label={t("dashboard.box.statFollow")} value={pct(bs.follow_through_pct)} />
+            <Cell label={t("dashboard.box.statInMarket")} value={`${traded} / ${data.segments.length}`} />
+          </div>
+          <p className="mt-3 text-[11px] leading-relaxed text-faint">{t("dashboard.box.disclaimer")}</p>
+        </>
+      )}
+
     </div>
   );
 }
@@ -1039,13 +1277,13 @@ function FundCard({ data, chartInterval, className }: { data: FundReport; chartI
           <div className="num mt-1 text-[15px] font-medium text-bone">{te.fund.money.toFixed(2)} € <span className={clsx("text-xs", tone(te.fund.ret_pct))}>{te.fund.ret_pct > 0 ? "+" : ""}{te.fund.ret_pct.toFixed(1)}%</span></div>
         </div>
         <div className="bg-panel/90 px-4 py-3">
-          <div className="text-[11px] text-faint">{t("fund.money.testHold")}</div>
-          <div className="num mt-1 text-[15px] font-medium text-bone">{te.buy_hold.money.toFixed(2)} € <span className={clsx("text-xs", tone(te.buy_hold.ret_pct))}>{te.buy_hold.ret_pct > 0 ? "+" : ""}{te.buy_hold.ret_pct.toFixed(1)}%</span></div>
+          <div className="text-[11px] text-faint">{t("pop.money.fundTrades")}</div>
+          <div className="num mt-1 text-[15px] font-medium text-bone">{`${w.fund.trades} · ${w.fund.fees.toFixed(2)} €`}</div>
         </div>
       </div>
       <div className="border-t border-line bg-panel/90 px-4 py-3">
         <div className="text-[11px] text-faint">{t("fund.money.dd")}</div>
-        <div className="num mt-1 text-[15px] font-medium text-bone">{Math.round(w.fund.max_dd_pct)}% <span className="text-xs text-faint">{t("fund.money.ddHold", { dd: Math.round(w.buy_hold.max_dd_pct) })}</span></div>
+        <div className="num mt-1 text-[15px] font-medium text-bone">{Math.round(w.fund.max_dd_pct)}%</div>
       </div>
     </Panel>
   );

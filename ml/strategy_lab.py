@@ -197,6 +197,10 @@ class Result:
     fees: float
     exposure_pct: float
     sharpe: float
+    sortino: float
+    calmar: float
+    low_sample: bool   # trades below LOW_SAMPLE_TRADES - Sharpe/Sortino/Calmar read as noise here,
+                        # not evidence (Ch. 9's "9 trades isn't statistically significant" warning)
 
 
 def wealth(pos: np.ndarray, r_next: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -206,6 +210,9 @@ def wealth(pos: np.ndarray, r_next: np.ndarray, mask: np.ndarray) -> np.ndarray:
     p = np.nan_to_num(pos)[idx]
     turnover = np.abs(p - np.concatenate([[0.0], p[:-1]]))
     return START * np.cumprod((1 + p * np.expm1(r_next[idx])) * (1 - FEE * turnover))
+
+
+LOW_SAMPLE_TRADES = 30   # a book-shaped threshold (Ch. 9), not an exact rule
 
 
 def simulate(pos: np.ndarray, r_next: np.ndarray, per_year: int, mask: np.ndarray) -> Result:
@@ -222,15 +229,22 @@ def simulate(pos: np.ndarray, r_next: np.ndarray, per_year: int, mask: np.ndarra
     fees = float((np.concatenate([[START], wealth[:-1]]) * FEE * turnover).sum())
     peak = np.maximum.accumulate(np.concatenate([[START], wealth]))
     dd = 1 - np.concatenate([[START], wealth]) / peak
+    max_dd_pct = round(float(dd.max()) * 100, 1)
     rets = np.log(step)
     years = len(idx) / per_year
     final = float(wealth[-1])
+    cagr_pct = round(((final / START) ** (1 / years) - 1) * 100, 1) if years > 0 and final > 0 else -100.0
+    downside = rets[rets < 0]
+    sortino = (round(float(rets.mean() / downside.std() * math.sqrt(per_year)), 2)
+               if len(downside) > 1 and downside.std() > 0 else 0.0)
+    calmar = round(cagr_pct / max_dd_pct, 2) if max_dd_pct > 0 else 0.0
+    trades = int((turnover > 1e-9).sum())
     return Result(
         money=round(final, 2), ret_pct=round((final / START - 1) * 100, 1),
-        cagr_pct=round(((final / START) ** (1 / years) - 1) * 100, 1) if years > 0 and final > 0 else -100.0,
-        max_dd_pct=round(float(dd.max()) * 100, 1), trades=int((turnover > 1e-9).sum()), fees=round(fees, 2),
+        cagr_pct=cagr_pct, max_dd_pct=max_dd_pct, trades=trades, fees=round(fees, 2),
         exposure_pct=round(float(np.abs(p).mean()) * 100, 1),
         sharpe=round(float(rets.mean() / rets.std() * math.sqrt(per_year)), 2) if rets.std() > 0 else 0.0,
+        sortino=sortino, calmar=calmar, low_sample=trades < LOW_SAMPLE_TRADES,
     )
 
 
@@ -253,16 +267,21 @@ def context(df: pd.DataFrame, interval: str) -> dict:
     }
 
 
-def box_positions(df: pd.DataFrame, interval: str) -> np.ndarray:
+def box_positions(df: pd.DataFrame, interval: str, train_bars: int | None = None,
+                   reopt_every: int | None = None, param_grid: list[dict] | None = None) -> np.ndarray:
     """The app's walk-forward Box Breakout (ml/box_breakout.run_adaptive:
     settings re-chosen every 100 bars from the 500 before) as a position per
     candle: held from the entry candle's close to the exit candle's. Scored
     close to close here, like every other strategy, not at its exact stop and
-    target fills."""
+    target fills.
+
+    `train_bars`/`reopt_every`/`param_grid` pass through to run_adaptive - only
+    ml/evolution.py uses these (to rescale the box signal's cadence for intervals finer than
+    the grid was tuned at, e.g. 15m), everyone else gets the unscaled default."""
     from ml import box_breakout
 
     rows = [{"timestamp": t.to_pydatetime(), **r} for t, r in df[["open", "high", "low", "close", "volume"]].iterrows()]
-    res = box_breakout.run_adaptive(rows, interval)
+    res = box_breakout.run_adaptive(rows, interval, train_bars=train_bars, reopt_every=reopt_every, param_grid=param_grid)
     where = {t: i for i, t in enumerate(df.index)}
     pos = np.zeros(len(df))
     for tr in res["trades"]:

@@ -10,8 +10,9 @@ import numpy as np
 
 from ml import evolution
 
-CAUSES = ("outcompeted", "big_loss", "fees", "bad_trades", "taxes")
-_NUMERIC_GENES = ("boldness", "temperament", "news_sensitivity", "window", "patience")
+CAUSES = ("outcompeted", "big_loss", "fees", "bad_trades", "fines")
+_NUMERIC_GENES = ("boldness", "temperament", "news_sensitivity", "window", "patience",
+                  "pred_w", "pattern_w", "box_w", "news_w")
 
 
 def current(key: str) -> evolution.EvolutionaryForecaster | None:
@@ -49,7 +50,7 @@ def report(ev: evolution.EvolutionaryForecaster, max_points: int = 400, max_gene
     for h in hist:
         timeline.append({
             "time": h["time"], "price": h.get("price"), "mood": h["mood"], "alive": h["alive"],
-            "fund": h.get("fund"), "buy_hold": h.get("buy_hold"), "richest": h.get("richest"),
+            "fund": h.get("fund"), "richest": h.get("richest"),
             "deaths": h["deaths"] - prev_deaths, "avg_generation": h.get("avg_generation"),
             "shares": h.get("shares", {}), **{g: h.get(g) for g in _NUMERIC_GENES},
         })

@@ -207,3 +207,27 @@ def test_analyze_combines_both():
     result = pr.analyze(candles)
     assert "candlestick" in result
     assert "geometric" in result
+
+
+# -- statistical validation (ml.signal_validation) ------------------------
+
+def test_validate_candlestick_patterns_scans_full_history_not_just_the_tail():
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    candles, t = [], 0
+    for _ in range(8):
+        candles.append(_candle(100, 100.5, 99.5, 100.0, ts + timedelta(hours=t))); t += 1
+        candles.append(_candle(100, 101, 90, 92, ts + timedelta(hours=t))); t += 1       # engulfed candle
+        candles.append(_candle(91, 105, 90, 103, ts + timedelta(hours=t))); t += 1       # engulfing candle (match)
+    candles.append(_candle(103, 104, 102, 103.5, ts + timedelta(hours=t)))  # trailing filler so the
+    # last engulfing occurrence isn't on the very last row (which label_future_return always excludes)
+
+    result = pr.validate_candlestick_patterns(candles, horizon=1)
+    assert "Bullish Engulfing" in result
+    stats = result["Bullish Engulfing"]
+    assert stats["n_signal"] == 8
+    assert stats["mean_return_signal_pct"] is not None
+    assert "anova_p" in stats and "chi2_p" in stats
+
+
+def test_validate_candlestick_patterns_on_empty_input():
+    assert pr.validate_candlestick_patterns([]) == {}

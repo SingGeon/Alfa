@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 
 import config
-from evaluation import charts, daily_report, evaluator, stats
+from evaluation import charts, daily_report, evaluator, stats, trade_watch
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +36,40 @@ def evaluate_and_chart_job() -> None:
 
 def snapshot_predictions_job() -> None:
     """Make the visual-history forecasts (config.EVAL_SNAPSHOT_STEPS steps,
-    both model variants, each of config.EVAL_SNAPSHOT_INTERVALS) on a timer,
-    so the history fills in even when nobody has the dashboard open. These
-    hit the warm model cache (api.services), so they're cheap; storage only
-    logs one when the forecast has actually changed since the last one."""
+    each of config.EVAL_SNAPSHOT_INTERVALS) on a timer, so the history fills
+    in even when nobody has the dashboard open. These hit the warm model
+    cache (api.services), so they're cheap; storage only logs one when the
+    forecast has actually changed since the last one.
+
+    "tuned" (ml.evolution) is excluded: that model's job is deciding *when*
+    to trade, not forecasting a price, so a timer-driven predicted-price
+    snapshot would misrepresent it - its own trade entries/exits get their
+    own snapshot instead, drawn the instant they happen (see
+    evolution_trade_snapshots_job / evaluation.trade_watch)."""
     from api.services import MODEL_VARIANTS, InsufficientDataError, run_prediction
 
     for interval in config.EVAL_SNAPSHOT_INTERVALS:
         for model_variant in MODEL_VARIANTS:
+            if model_variant == "tuned":
+                continue
             try:
                 run_prediction(interval=interval, steps=config.EVAL_SNAPSHOT_STEPS, model_variant=model_variant)
             except InsufficientDataError:
                 logger.info("Skipping %s snapshot prediction (%s) - not enough candles yet", interval, model_variant)
             except Exception:
                 logger.exception("Snapshot prediction failed for %s/%s", interval, model_variant)
+
+
+def evolution_trade_snapshots_job() -> None:
+    """Every minute: draw a snapshot for any evolution-fund trade that opened or closed since
+    the last check (ml.evolution.EvolutionaryForecaster.fund_trades_report, via
+    evaluation.trade_watch) - not on a prediction timer, never a forecast line."""
+    try:
+        drawn = trade_watch.check_all()
+        if drawn:
+            logger.info("Evolution trade snapshots: %d drawn", drawn)
+    except Exception:
+        logger.exception("Evolution trade snapshot job failed")
 
 
 def daily_report_job() -> None:
@@ -81,6 +101,7 @@ def startup_recovery() -> None:
     except Exception:
         logger.exception("Evaluation startup recovery failed")
     snapshot_predictions_job()
+    evolution_trade_snapshots_job()
 
 
 def register_jobs(scheduler) -> None:
@@ -90,6 +111,10 @@ def register_jobs(scheduler) -> None:
     )
     scheduler.add_job(
         evaluate_and_chart_job, "interval", minutes=1, id="evaluate_predictions",
+        max_instances=1, coalesce=True,
+    )
+    scheduler.add_job(
+        evolution_trade_snapshots_job, "interval", minutes=1, id="evolution_trade_snapshots",
         max_instances=1, coalesce=True,
     )
     scheduler.add_job(

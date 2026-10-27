@@ -22,6 +22,10 @@ const INTERVALS: Interval[] = ["15m", "1h", "4h", "1d", "1w"];
 const PAGE_SIZE = 50;
 const GENE_ORDER = ["momentum", "trend", "long", "volatility", "volume", "oscillators", "btc", "sentiment", "news", "defi", "futures"];
 const TRAITS: { key: keyof EvolutionTimelinePoint; digits: number; range: [number, number] | null; mid?: number }[] = [
+  { key: "pred_w", digits: 2, range: [0, 2] },
+  { key: "pattern_w", digits: 2, range: [0, 2] },
+  { key: "box_w", digits: 2, range: [0, 2] },
+  { key: "news_w", digits: 2, range: [0, 2] },
   { key: "boldness", digits: 2, range: [0, 2] },
   { key: "temperament", digits: 2, range: [0, 0.6] },
   { key: "news_sensitivity", digits: 2, range: [-1, 1], mid: 0 },
@@ -30,7 +34,8 @@ const TRAITS: { key: keyof EvolutionTimelinePoint; digits: number; range: [numbe
   { key: "avg_generation", digits: 0, range: null },
 ];
 const EMOJI: Record<string, string> = { fear: "😨", caution: "🤔", calm: "😐", confidence: "🙂", euphoria: "🤩" };
-const CAUSE_TONE: Record<string, "neutral" | "down" | "warn"> = { outcompeted: "neutral", big_loss: "down", fees: "warn", bad_trades: "down", taxes: "warn" };
+const CAUSE_TONE: Record<string, "neutral" | "down" | "warn"> = { outcompeted: "neutral", big_loss: "down", fees: "warn", bad_trades: "down", fines: "warn" };
+const CAUSES = ["outcompeted", "big_loss", "fees", "bad_trades", "fines"];
 
 type Filters = { cause: string; generation: string; generationTo: string; organism: string; order: "asc" | "desc" };
 const EMPTY_FILTERS: Filters = { cause: "", generation: "", generationTo: "", organism: "", order: "desc" };
@@ -151,7 +156,7 @@ export default function Population() {
                 text: `${fmt.num(c.deaths)} (${c.share_pct}%${c.avg_age != null ? ` · ${t("pop.causes.avgAge", { n: fmt.num(c.avg_age) })}` : ""})`,
               }))} />
               <dl className="mt-5 grid gap-2.5 text-[12px] sm:grid-cols-2">
-                {["outcompeted", "big_loss", "fees", "bad_trades", "taxes"].map((c) => (
+                {CAUSES.map((c) => (
                   <div key={c}>
                     <dt className="font-medium text-bone">{t(`pop.cause.${c}`)}</dt>
                     <dd className="text-faint">{t(`pop.causeHelp.${c}`)}</dd>
@@ -209,10 +214,10 @@ export default function Population() {
               <PanelHeader title={t("pop.generations.header")} hint={t("pop.generations.hint")} />
             </div>
             <div className="overflow-x-auto border-t border-line">
-              <table className="w-full min-w-[980px] border-collapse text-[12.5px]">
+              <table className="w-full min-w-[1120px] border-collapse text-[12.5px]">
                 <thead>
                   <tr className="border-b border-line text-left text-[11px] text-faint">
-                    {[t("pop.col.generations"), t("pop.col.models"), t("pop.col.alive"), t("pop.col.avgLife"), t("pop.col.causes"), t("pop.col.topInputs"), t("pop.col.boldness"), t("pop.col.temperament"), t("pop.col.news"), t("pop.col.window"), t("pop.col.patience")].map((h, i) => (
+                    {[t("pop.col.generations"), t("pop.col.models"), t("pop.col.alive"), t("pop.col.avgLife"), t("pop.col.causes"), t("pop.col.topInputs"), t("pop.col.predW"), t("pop.col.patternW"), t("pop.col.boxW"), t("pop.col.newsW"), t("pop.col.window"), t("pop.col.patience")].map((h, i) => (
                       <th key={h} className={clsx("py-2.5 font-medium", i >= 2 && i <= 3 ? "px-3 text-right" : i >= 6 ? "px-3 text-right" : "px-3 text-left", i === 0 && "pl-4 sm:pl-5")}>{h}</th>
                     ))}
                   </tr>
@@ -233,9 +238,10 @@ export default function Population() {
                           )) : "—"}
                         </td>
                         <td className="max-w-[260px] px-3 py-2.5 text-dim">{top}</td>
-                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.boldness, 2)}</td>
-                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.temperament, 2)}</td>
-                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.news_sensitivity, 2)}</td>
+                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.pred_w, 2)}</td>
+                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.pattern_w, 2)}</td>
+                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.box_w, 2)}</td>
+                        <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.news_w, 2)}</td>
                         <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.window)}</td>
                         <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(g.patience, 2)}</td>
                       </tr>
@@ -255,7 +261,7 @@ export default function Population() {
                 <GField label={t("pop.filter.cause")}>
                   <select className="field" value={filters.cause} onChange={(e) => setFilter({ cause: e.target.value })}>
                     <option value="">{t("eval.filter.all")}</option>
-                    {["outcompeted", "big_loss", "fees", "bad_trades", "taxes"].map((c) => <option key={c} value={c}>{t(`pop.cause.${c}`)}</option>)}
+                    {CAUSES.map((c) => <option key={c} value={c}>{t(`pop.cause.${c}`)}</option>)}
                   </select>
                 </GField>
                 <GField label={t("pop.filter.generation")}>
@@ -431,8 +437,6 @@ function MoneyPanel({ r, fmt, t }: { r: EvolutionReport; fmt: Fmt; t: TFn }) {
     const pts = r.timeline.filter((p) => p.fund != null).map((p) => ({ ...p, t: toUnix(p.time) as UTCTimestamp }))
       .filter((p, i, a) => i === 0 || p.t > a[i - 1].t);
     const eurFmt = { type: "custom" as const, formatter: (v: number) => `${v.toFixed(0)} €` };
-    const hold = chart.addLineSeries({ color: muted, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, priceFormat: eurFmt, title: t("pop.money.hold") });
-    hold.setData(pts.map((p) => ({ time: p.t, value: p.buy_hold ?? undefined })).filter((p) => p.value != null) as { time: UTCTimestamp; value: number }[]);
     const fund = chart.addLineSeries({ color: pred, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, priceFormat: eurFmt, title: t("pop.money.fund") });
     fund.setData(pts.map((p) => ({ time: p.t, value: p.fund! })));
     fund.createPriceLine({ price: 100, color: muted, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false });
@@ -440,7 +444,7 @@ function MoneyPanel({ r, fmt, t }: { r: EvolutionReport; fmt: Fmt; t: TFn }) {
     const byTime = new Map(pts.map((p) => [p.t, p]));
     const readoutFor = (point?: typeof pts[number]) => {
       if (!point) { setReadout(""); return; }
-      setReadout(`${fmt.eur(point.fund)} · ${fmt.eur(point.buy_hold)} · ${fmt.day(point.time)}`);
+      setReadout(`${fmt.eur(point.fund)} · ${fmt.day(point.time)}`);
     };
     chart.subscribeCrosshairMove((param) => readoutFor(param.time ? byTime.get(param.time as UTCTimestamp) : pts[pts.length - 1]));
     chart.timeScale().fitContent();
@@ -458,14 +462,14 @@ function MoneyPanel({ r, fmt, t }: { r: EvolutionReport; fmt: Fmt; t: TFn }) {
       <PanelHeader title={t("pop.money.header")} hint={t("pop.money.hint")} />
       <div className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-[20px] border border-line bg-line sm:grid-cols-3">
         <Tile label={t("pop.money.fund")} value={<>{fmt.eur(m.fund)} <small className={sign(m.fund_return_pct)}>{fmt.pct(m.fund_return_pct, 1)}</small></>} />
-        <Tile label={t("pop.money.hold")} value={<>{fmt.eur(m.buy_hold)} <small className={sign(m.buy_hold_return_pct)}>{fmt.pct(m.buy_hold_return_pct, 1)}</small></>} />
+        <Tile label={t("pop.money.avgDaily")} value={<>{fmt.pct(m.avg_daily_return_pct, 3)} <small className="text-faint">/ {fmt.pct(m.target_daily_pct, 0)} {t("pop.money.target")}</small></>} />
         <Tile label={t("pop.money.fundTrades")} value={`${fmt.num(m.fund_trades)} · ${fmt.eur(m.fund_fees)}`} />
         <Tile label={t("pop.money.fundNow")} value={positionLabel(t, m.fund_position)} />
         <Tile label={t("pop.money.richest")} value={m.richest ? `#${m.richest.id} · ${fmt.eur(m.richest.money)}` : "—"} />
         <Tile label={t("pop.money.positions")} value={t("pop.money.positionsValue", { long: m.long, short: m.short, out: m.out })} />
       </div>
       <div className="mt-4 flex items-baseline justify-between text-[12px]">
-        <span className="text-faint">{t("pop.money.fund")} · {t("pop.money.hold")}</span>
+        <span className="text-faint">{t("pop.money.fund")}</span>
         <b className="num text-bone">{readout}</b>
       </div>
       <div ref={ref} className="mt-1.5 h-56" />
@@ -616,6 +620,10 @@ function OrganismDialog({
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5 text-[12px] text-dim">
             {[
+              [t("pop.trait.pred_w"), fmt.num(o.pred_w, 2)],
+              [t("pop.trait.pattern_w"), fmt.num(o.pattern_w, 2)],
+              [t("pop.trait.box_w"), fmt.num(o.box_w, 2)],
+              [t("pop.trait.news_w"), fmt.num(o.news_w, 2)],
               [t("pop.trait.boldness"), fmt.num(o.boldness, 2)],
               [t("pop.trait.temperament"), fmt.num(o.temperament, 2)],
               [t("pop.trait.news_sensitivity"), fmt.num(o.news_sensitivity, 2)],

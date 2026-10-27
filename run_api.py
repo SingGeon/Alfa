@@ -18,6 +18,7 @@ from data_collector.jobs import (
     run_all_once,
 )
 from evaluation import jobs as evaluation_jobs
+from evaluation.box_breakout_robustness import refresh_all as refresh_box_breakout_monte_carlo
 from ml.strategy_fund import refresh_all as refresh_strategy_fund
 from scout.scanner import run_scout_scan
 
@@ -60,6 +61,15 @@ def _refresh_strategy_fund_subprocess() -> None:
     ctx.Process(target=refresh_strategy_fund, daemon=True, name="strategy-fund-proc").start()
 
 
+def _refresh_box_breakout_monte_carlo_subprocess() -> None:
+    """Recompute the box breakout strategy's Monte Carlo robustness report
+    (evaluation/box_breakout_robustness.py) for every interval whose report
+    is over a day old - hundreds of simulated reruns, so in its own process
+    for the same GIL reason as the Scout scan above."""
+    ctx = multiprocessing.get_context("spawn")
+    ctx.Process(target=refresh_box_breakout_monte_carlo, daemon=True, name="box-breakout-mc-proc").start()
+
+
 def _warm_up_loop() -> None:
     while True:
         try:
@@ -87,6 +97,7 @@ def _start_market_data_scheduler() -> None:
     run_all_once()
     _run_scout_scan_subprocess()
     _refresh_strategy_fund_subprocess()
+    _refresh_box_breakout_monte_carlo_subprocess()
 
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(collect_market_data_job, "interval", minutes=config.COLLECT_INTERVAL_MINUTES, id="collect_market_data")
@@ -105,6 +116,10 @@ def _start_market_data_scheduler() -> None:
     # A 4h candle closes at 00/04/08..., a daily one at 00:00 UTC: check a
     # few minutes after every hour, recompute only what's behind.
     scheduler.add_job(_refresh_strategy_fund_subprocess, "cron", minute=3, id="strategy_fund")
+    # Once a day is plenty for a robustness health-check, not a live-trading number.
+    scheduler.add_job(
+        _refresh_box_breakout_monte_carlo_subprocess, "cron", hour=1, minute=30, id="box_breakout_monte_carlo",
+    )
     # Prediction evaluation: real prices every minute, daily overview at 00:05 UTC.
     evaluation_jobs.register_jobs(scheduler)
     scheduler.start()

@@ -19,6 +19,9 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
+import pandas as pd
+
 import config
 from data_collector.http_utils import ExternalAPIError, get_json
 from evaluation import storage
@@ -75,6 +78,35 @@ def score_path(pred: dict, actual_path: list[dict]) -> dict:
         "skill_score": round(1 - mae_model / mae_base, 5) if mae_base else None,
         "band_coverage": round(sum(inside) / len(inside), 5) if inside else None,
     }
+
+
+def validate_model_skill(model_name: str, interval: str | None = None) -> dict:
+    """Does this model's "predicted up" vs "predicted down" call actually carry real direction
+    skill, on its own completed, already-resolved predictions - or could it have scored this well
+    by chance? (see ml.signal_validation - Ch. 7's statistical-validation discipline). No
+    retraining, no synthetic holdout: this scores the live evaluation log as-is."""
+    from ml.signal_validation import validate_signal
+
+    filters: dict = {"model": model_name, "status": "completed"}
+    if interval:
+        filters["interval"] = interval
+    rows, _ = storage.query_predictions(filters, page_size=0)
+    rows = [r for r in rows if r["price_at_prediction"] and r["predicted_final_price"] is not None
+            and r["actual_final_price"] is not None]
+    if not rows:
+        return {"n_signal": 0, "n_baseline": 0, "mean_return_signal_pct": None,
+                "mean_return_baseline_pct": None, "anova_p": None, "chi2_p": None,
+                "significant": False, "low_sample": True}
+
+    predicted_up = np.array([r["predicted_final_price"] > r["price_at_prediction"] for r in rows])
+    actual_return_pct = np.array([
+        (r["actual_final_price"] / r["price_at_prediction"] - 1) * 100 for r in rows
+    ])
+    from ml.signal_validation import FLAT_THRESHOLD_PCT
+    category = np.where(actual_return_pct > FLAT_THRESHOLD_PCT, "up",
+                np.where(actual_return_pct < -FLAT_THRESHOLD_PCT, "down", "flat"))
+    future = pd.DataFrame({"future_return_pct": actual_return_pct, "category": category})
+    return validate_signal(predicted_up, future)
 
 
 def rescore_unscored() -> int:

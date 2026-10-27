@@ -41,6 +41,7 @@ import math
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,8 @@ class DirectForecaster:
             X, y = X_all[mask], y_all[mask]
             if len(X) < _MIN_TRAIN_ROWS:
                 continue
-            entry = {"train_rows": len(X), "cal_rows": 0, "cqr_q": 0.0, "alpha": 0.0, "holdout_skill": None}
+            entry = {"train_rows": len(X), "cal_rows": 0, "cqr_q": 0.0, "alpha": 0.0, "holdout_skill": None,
+                     "holdout_corr": None, "holdout_corr_p": None}
 
             if len(X) >= self.cqr_min_rows:
                 split = int(len(X) * (1 - self.cqr_calibration_fraction))
@@ -103,6 +105,13 @@ class DirectForecaster:
                 baseline_err = np.abs(y_cal).mean()
                 entry["alpha"] = float(_SHRINK_GRID[best])
                 entry["holdout_skill"] = float(1 - errors[-1] / baseline_err) if baseline_err else None
+
+                # Statistical validation (Ch. 7's discipline, see ml.signal_validation): is the raw
+                # model's prediction actually correlated with what the price did, on data it never
+                # trained on - or could a model with zero real skill have produced this by chance?
+                if len(probe) >= 3 and np.std(probe) > 0 and np.std(y_cal) > 0:
+                    corr, corr_p = stats.pearsonr(probe, y_cal)
+                    entry["holdout_corr"], entry["holdout_corr_p"] = float(corr), float(corr_p)
 
                 lower = [gbr(s, loss="quantile", alpha=low_q).fit(X_fit, y_fit) for s in self.seeds]
                 upper = [gbr(s, loss="quantile", alpha=high_q).fit(X_fit, y_fit) for s in self.seeds]
@@ -167,7 +176,8 @@ class DirectForecaster:
             hi = float(np.mean([m.predict(row_c)[0] for m in e["upper"]])) + e["cqr_q"]
             lo, hi = min(lo, hi, point), max(lo, hi, point)
             per_h[h] = {"h": h, "raw_return": raw, "alpha": e["alpha"], "return": point, "low": lo, "high": hi,
-                        "cqr_q": e["cqr_q"], "cal_rows": e["cal_rows"], "holdout_skill": e["holdout_skill"]}
+                        "cqr_q": e["cqr_q"], "cal_rows": e["cal_rows"], "holdout_skill": e["holdout_skill"],
+                        "holdout_corr": e["holdout_corr"], "holdout_corr_p": e["holdout_corr_p"]}
 
         known = sorted(per_h)
         path, step_log = [], []

@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from ml import strategy_evolution as se
 from ml import strategy_lab as lab
@@ -23,6 +24,27 @@ def test_every_trade_pays_the_fee():
     assert r.money == round(lab.START * (1 - lab.FEE), 2) and r.trades == 1
     flip = np.array([1.0, -1.0] * 5)                     # long, short, long...: 2x the money changes hands each time
     assert lab.simulate(flip, flat, 365, mask).fees > 9 * 2 * lab.FEE * 90
+
+
+def test_simulate_computes_sortino_and_calmar():
+    n = 10
+    pos = np.ones(n)
+    r_next = np.array([0.01, -0.02, 0.01, 0.01, -0.01, 0.02, 0.01, -0.02, 0.01, 0.01])
+    mask = np.ones(n, dtype=bool)
+    r = lab.simulate(pos, r_next, 365, mask)
+    assert r.sortino == pytest.approx(11.75, abs=0.01)
+    assert r.calmar == pytest.approx(94.1, abs=0.1)
+    assert r.low_sample is True   # only 1 trade (buy once and hold)
+
+
+def test_simulate_low_sample_flag_clears_with_enough_trades():
+    n = 40
+    mask = np.ones(n, dtype=bool)
+    flip = np.array([1.0, -1.0] * (n // 2))
+    r_next = np.random.default_rng(0).normal(0, 0.01, n)
+    r = lab.simulate(flip, r_next, 365, mask)
+    assert r.trades == 40
+    assert r.low_sample is False
 
 
 def test_wealth_matches_simulate():

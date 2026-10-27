@@ -245,7 +245,10 @@ class PricePredictor:
         from sklearn.ensemble import GradientBoostingRegressor
 
         if self.model_variant in _EVOLUTION_VARIANTS:
-            self._evolution = evolve(df, self.evolution_key)
+            # evolution_key is "{coin_id}_{interval}" (see __init__) - the population needs to
+            # know its own interval to scale its time-dependent constants (ml/evolution.py).
+            interval = self.evolution_key.rsplit("_", 1)[-1] if self.evolution_key else "1h"
+            self._evolution = evolve(df, self.evolution_key, interval=interval)
             self._models = []  # ridge organisms: no tree feature importances
             return
 

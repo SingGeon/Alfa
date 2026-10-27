@@ -1,0 +1,199 @@
+ALGORITHMIC TRADING HANDS-ON APPROACH USING PYTHON (Ziad Francis)
+Rezumat capitol cu capitol + ce putem lua de acolo pentru aplicația noastră.
+Legendă: [AVEM DEJA] = construit în cod, fie vizibil fie doar backend
+         [IDEE NOUĂ]  = nu există încă, merită discutat
+         [NU SE APLICĂ] = presupune tranzacționare live la un broker, nu e cazul nostru
+
+================================================================
+CAP. 1 — PRELIMINARII
+================================================================
+Ce explică: ce înseamnă trading algoritmic vs. automat vs. "asistat" (omul
+rămâne în buclă), așteptări realiste de randament (autorul dă un reper de
+15-30%/an ca fiind deja un rezultat bun, nu promisiuni de îmbogățire rapidă),
+pericolele leverage-ului mare, de ce Python.
+
+Relevanță pentru noi: niciun cod anume, dar un reper util de "sanity check"
+pentru orice randament raportat de fond (ex: dacă `strategy_fund` arată
++800% pe toată perioada, comparăm mental cu "15-30%/an e deja foarte bun"
+ca să nu ne lăsăm păcăliți de un backtest suspect de bun).
+
+================================================================
+CAP. 2 — PIEȚE FINANCIARE ȘI DATE DISPONIBILE
+================================================================
+Ce explică: tipuri de instrumente (acțiuni, obligațiuni, forex, derivate,
+mărfuri), tipuri de ordine, lichiditate și spread, tipuri de date de piață,
+furnizori de date, acuratețe/latență a datelor.
+
+Relevanță: [AVEM DEJA] gestionăm deja sursa de date (Binance principal,
+CoinGecko fallback, cu `is_stale`/verificări de prospețime în mai multe
+locuri: `strategy_fund.is_stale`, `box_breakout_robustness.is_stale`).
+[IDEE NOUĂ] nu modelăm deloc spread-ul/lichiditatea — toate backtesturile
+presupun că poți intra/ieși exact la prețul de close, fără slippage. Pe
+ETH/USDT la orele cu lichiditate bună probabil contează puțin, dar ar fi
+onest să menționăm asta undeva (poate un mic disclaimer).
+
+================================================================
+CAP. 3 — PYTHON PENTRU TRADING
+================================================================
+Ce explică: setup mediu, librării cheie (pandas, numpy, scipy/statsmodels,
+pandas-ta, TA-Lib, backtesting.py, scikit-learn), conectare la un broker
+(OANDA) pentru live trading.
+
+Relevanță: [AVEM DEJA] folosim deja pandas/numpy/scipy/scikit-learn peste
+tot. [NU SE APLICĂ] conectarea la un broker real pentru execuție live —
+aplicația noastră e un simulator/semnalizator, nu tranzacționează bani
+reali.
+
+================================================================
+CAP. 4 — DATE, INDICATORI DE BAZĂ, VIZUALIZARE
+================================================================
+Ce explică: import/curățare date, verificare integritate timestamp-uri,
+grafic candlestick, indicatori de bază pe chart (medii mobile, Bollinger
+Bands).
+
+Relevanță: [AVEM DEJA] complet acoperit — `PriceChart.tsx` are candele,
+SMA/EMA, Bollinger, RSI, MACD, VWAP, Fibonacci deja în meniul de
+indicatori.
+
+================================================================
+CAP. 5 — INDICATORI AVANSAȚI ȘI DETECTARE AUTOMATĂ DE PATTERN-URI
+================================================================
+Ce explică: combinarea indicatorilor clasici pe mai multe ferestre de timp
+(ex: RSI pe 3 ferestre suprapuse), regresie liniară pentru detectarea
+pantei de trend/momentum, detectare de fractali (minime/maxime locale),
+detectare de canale de preț și triunghiuri, pattern-uri pe candele
+(engulfing, rejection) codate cu grijă să nu "vadă în viitor" (fereastră
+de confirmare, nu doar vârful exact).
+
+Relevanță: [AVEM DEJA] `ml/pattern_recognition.py` e deja mai avansat decât
+ce descrie capitolul — are nu doar engulfing/rejection ci și double
+top/bottom, head&shoulders, triunghiuri, pene, steaguri, canal, cup&handle,
+toate cu aceeași disciplină anti-lookahead (fereastră de confirmare).
+[IDEE NOUĂ] "regresia liniară pentru panta de trend" ca filtru separat nu
+există explicit la noi — organismele din `evolution.py` învață o regresie
+Ridge pe multe feature-uri simultan, nu un simplu "slope-ul ultimelor N
+candele" ca semnal de sine stătător. Ar putea fi un al 5-lea "tool" simplu
+de adăugat (mult mai ieftin de calculat decât modelele ML).
+
+================================================================
+CAP. 6 — SUPORT/REZISTENȚĂ ȘI NIVELURI FIBONACCI
+================================================================
+Ce explică: identificarea nivelurilor cheie de suport/rezistență din
+swing-uri istorice, nivelurile de retragere Fibonacci.
+
+Relevanță: [AVEM DEJA] Fibonacci apare deja ca opțiune în meniul de
+indicatori al dashboard-ului (`FIB_LEVELS` în `lib/indicators.ts`).
+[IDEE NOUĂ] suport/rezistență clasic (linii orizontale din swing-uri
+istorice trecute, nu doar Fibonacci) nu pare să existe ca overlay separat
+pe grafic — ar fi un overlay vizual simplu de adăugat, în stilul
+pattern-urilor geometrice deja existente.
+
+================================================================
+CAP. 7 — EVALUAREA STATISTICĂ A INDICATORILOR TEHNICI  ⭐
+================================================================
+Ce explică: etichetarea prețului viitor (return mediu, categorie
+up/flat/down), testarea explicită dacă un pattern (rejection, engulfing)
+chiar prezice ceva — ANOVA pe return-urile viitoare grupate după semnal,
+test chi-pătrat de independență între "semnal prezent" și "direcție
+viitoare".
+
+Relevanță: [AVEM DEJA] — acesta e capitolul pe care l-am implementat deja
+aproape 1:1: `ml/signal_validation.py` (exact ANOVA + chi-pătrat, exact
+etichetarea up/flat/down), aplicat peste `pattern_recognition.py` și
+`box_breakout.py`, plus validarea istoricului real de predicții în
+`evaluation/evaluator.py::validate_model_skill`. Era afișat în UI sub
+butonul "Validation", pe care tocmai l-am scos — rămâne de discutat DACĂ
+și CUM îl aducem înapoi (poate integrat altfel, nu ca panou separat).
+
+================================================================
+CAP. 8 — CONSTRUIREA STRATEGIILOR DE TRADING
+================================================================
+Ce explică: tipuri de strategii (scalping/day/swing/position trading),
+componentele unei strategii algoritmice (filtru de trend, punct de intrare,
+strategie de ieșire, risc/dimensionare poziție), unde pui stop-loss-ul, și
+3 metode de dimensionare a poziției: (1) mărime constantă, (2) procent fix
+din capital, (3) bazată pe raportul risc-recompensă.
+
+Relevanță: [AVEM DEJA] `box_breakout.py` are deja filtru de trend (breakout
+confirmat de volum), intrare/ieșire clare, stop pe partea opusă a
+box-ului. `evolution.py` dimensionează poziția continuu (Kelly-ish), nu
+discret. [IDEE NOUĂ] cele 3 metode explicite de dimensionare a poziției
+din carte NU sunt expuse ca opțiuni comparabile la noi — ar fi interesant
+un "position sizing lab" similar cu `compare_exit_management()`, dar
+pentru dimensionare în loc de exit, ca să vedem cât contează alegerea asta
+separat de semnal.
+
+================================================================
+CAP. 9 — BACKTESTING STRATEGII DE TRADING  ⭐
+================================================================
+Ce explică: pachetul backtesting.py, cum se citește un raport de backtest,
+cei 3 indicatori de calitate (Sharpe, Sortino, Calmar) și ce spune fiecare,
+4 studii de caz pe aceeași strategie cu exit-uri diferite (stop/target fix,
+stop pe bază de ATR, trailing stop, breakeven dinamic) — arătând că
+alegerea exit-ului schimbă enorm rezultatul chiar cu aceleași intrări,
+vizualizarea unui backtest (grafic cu 5 panouri: equity curve, P&L per
+tranzacție, preț+tranzacții, volum, semnale).
+
+Relevanță: [AVEM DEJA] — al doilea capitol aproape complet implementat:
+Sharpe/Sortino/Calmar/SQN în `box_breakout.py` și `strategy_lab.py`, exact
+cele 4 variante de exit în `compare_exit_management()`. Era afișat tot sub
+butonul "Validation", scos acum din UI.
+[IDEE NOUĂ] vizualizarea cu 5 panouri (graficul complet de backtest) nu
+există la noi ca atare — avem piese separate (chart preț, tile-uri de
+statistici) dar nu un singur raport vizual unificat ca în carte.
+
+================================================================
+CAP. 10 — ROBUSTEȚE PRIN METODA MONTE CARLO  ⭐
+================================================================
+Ce explică: aplicarea unui zgomot gaussian mic pe preț și rerularea
+backtestului de sute de ori cu setările nemodificate, ca să vezi dacă
+rezultatul "bun" ține la variații mici ale istoricului sau a fost noroc de
+traiectorie; vizualizare prin curbe de echitate suprapuse și histograme ale
+rezultatelor finale — cu avertismentul cheie: o distribuție bimodală a
+drawdown-ului înseamnă două regimuri de rezultat ascunse într-un singur
+backtest.
+
+Relevanță: [AVEM DEJA] — al treilea capitol aproape complet implementat:
+`ml/monte_carlo.py` (zgomot calibrat la volatilitatea reală a datelor, nu
+un procent fix din carte), `evaluation/box_breakout_robustness.py` (job de
+fundal + raport salvat), `evaluation/charts.py::render_monte_carlo_report`
+(fan chart + 3 histograme + detector automat de bimodalitate). Era afișat
+tot sub "Validation", scos acum din UI — probabil cel mai valoros lucru de
+adus înapoi, pentru că a confirmat deja o problemă reală (vezi discuția
+din sesiunea trecută: box_breakout pe 1h arăta +25% pe backtest, dar
+mediana pe 100 rulări Monte Carlo era -50%).
+
+================================================================
+CAP. 11 — SISTEME DE TRADING AUTOMATIZATE
+================================================================
+Ce explică: automatizarea alertelor de trading (email), extinderea la
+mai multe active simultan, abordare complet automatizată (bot care
+tranzacționează singur la un broker).
+
+Relevanță: [NU SE APLICĂ] execuția live la broker — aplicația noastră nu
+tranzacționează bani reali. [IDEE NOUĂ] alertele automate (ex: notificare
+când fondul de evoluție deschide/închide o poziție, sau când box breakout
+dă un semnal nou) ar putea fi utile — avem deja job-uri pe fundal
+(`evaluation/trade_watch.py` deja detectează exact momentul deschiderii/
+închiderii unei tranzacții), ar trebui doar un canal de notificare (email/
+webhook) peste ce există deja.
+
+================================================================
+CAP. 12 — GÂNDURI FINALE
+================================================================
+Ce explică: reflecții personale ale autorului, rolul AI-ului în viitorul
+trading-ului algoritmic (discursiv, fără cod), cum rămâi la curent cu
+domeniul, rezumat.
+
+Relevanță: fără cod concret de preluat, e capitolul de încheiere.
+
+================================================================
+PE SCURT — CE AM CONSTRUIT DEJA DIN CARTE (Cap. 7, 9, 10)
+================================================================
+Tot ce ține de validare statistică, metrici de risc (Sortino/Calmar/SQN),
+comparație de exit-uri, și Monte Carlo robustness e DEJA construit și
+funcțional în backend — a fost scos doar din interfață (butonul
+"Validation"), nu șters din cod. Discuția de-acum ar trebui să fie: cum/
+unde îl integrăm înapoi (dacă deloc), și care din ideile noi de mai sus
+(regresie de trend ca semnal simplu, suport/rezistență vizual, position
+sizing lab, alerte automate) merită prioritizate.

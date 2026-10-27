@@ -15,8 +15,9 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
 import config
 from api.services import (
@@ -30,7 +31,15 @@ from api.services import (
 )
 from data_collector.market_data import SUPPORTED_INTERVALS, MarketDataError, get_current_price
 from database import repository
+from evaluation import charts as eval_charts
+from evaluation.recorder import model_name_for
+from evaluation import box_breakout_robustness
 from ml import box_breakout, evolution_report, pattern_recognition, strategy_fund
+from ml.features import candles_to_dataframe
+
+# How many candles ahead a signal's statistical validation (ml.signal_validation) looks to score
+# whether it actually predicted anything - same horizon for breakout and candlestick patterns.
+VALIDATION_HORIZON = 24
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +436,12 @@ def patterns():
     if len(candles) < 20:
         return jsonify({"error": f"Only {len(candles)} {interval} candles stored for {coin_id}; need >= 20"}), 409
 
-    return jsonify({"coin_id": coin_id, "interval": interval, **pattern_recognition.analyze(candles, _get_lang())})
+    result = {"coin_id": coin_id, "interval": interval, **pattern_recognition.analyze(candles, _get_lang())}
+    try:
+        result["validation"] = pattern_recognition.validate_candlestick_patterns(candles, horizon=VALIDATION_HORIZON)
+    except Exception:
+        logger.exception("Pattern validation failed for %s/%s", coin_id, interval)
+    return jsonify(result)
 
 
 # (coin_id, interval) -> (last candle timestamp, result): the adaptive run
@@ -456,8 +470,48 @@ def box_breakout_strategy():
         result = {"coin_id": coin_id, "interval": interval, **box_breakout.run_adaptive(candles, interval)}
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 409
+    _add_box_validation(result, candles, interval)
     _box_cache[key] = (stamp, result)
     return jsonify(result)
+
+
+def _add_box_validation(result: dict, candles: list[dict], interval: str) -> None:
+    """Statistical validation of the breakout signal + a side-by-side comparison of exit-
+    management variants (ml.signal_validation, ml.box_breakout.compare_exit_management - Ch. 7
+    and Ch. 9's discipline), both computed on the *current* walk-forward segment's settings
+    applied consistently - run_adaptive's own boxes/trades span several different settings over
+    time, which compare_exit_management can't meaningfully replay. Best-effort: never breaks the
+    main box-breakout response if it fails."""
+    settings = result.get("current", {}).get("settings")
+    if not settings:
+        return
+    try:
+        s = box_breakout.BoxSettings(**settings)
+        df = candles_to_dataframe(box_breakout.closed_candles(candles, interval))
+        boxes = box_breakout.detect_boxes(df, s)
+        result["signal_validation"] = box_breakout.validate_breakout_signal(df, boxes, horizon=VALIDATION_HORIZON)
+        result["exit_comparison"] = box_breakout.compare_exit_management(df, boxes, s)
+    except Exception:
+        logger.exception("Box breakout signal validation failed for %s", interval)
+
+
+@api_bp.get("/box-breakout/monte-carlo")
+def box_breakout_monte_carlo():
+    """Monte Carlo robustness report for the box breakout strategy (ml/monte_carlo.py, Ch. 10):
+    computed in the background (see run_api.py), read here as a fast, cached JSON + PNG."""
+    interval = request.args.get("interval", "1h")
+    report = box_breakout_robustness.load(interval)
+    if report is None:
+        return jsonify({"available": False, "interval": interval})
+    return jsonify({"available": True, "png_url": f"/api/box-breakout/monte-carlo/{interval}.png", **report})
+
+
+@api_bp.get("/box-breakout/monte-carlo/<interval>.png")
+def box_breakout_monte_carlo_png(interval: str):
+    path = box_breakout_robustness.report_png_path(interval)
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    return send_file(path, mimetype="image/png", max_age=3600)
 
 
 def _population(interval: str):
@@ -523,12 +577,62 @@ def evolution_population_organism(organism_id: int):
     return jsonify(found)
 
 
+def _trade_with_snapshots(trade: dict, model_name: str, interval: str) -> dict:
+    """Attaches entry/exit snapshot URLs (evaluation.trade_watch draws them the instant the
+    fund's live trade opens/closes - see evaluation/charts.py's trade_snapshot_path) when the
+    file exists. Trades from before that feature started running simply get null URLs."""
+    out = dict(trade)
+    for kind in ("entry", "exit"):
+        if kind == "exit" and not trade.get("exit_time"):
+            out["exit_snapshot_url"] = None
+            continue
+        path = eval_charts.trade_snapshot_path(model_name, interval, trade, kind)
+        out[f"{kind}_snapshot_url"] = (
+            f"/api/evolution/trades/snapshot.png?interval={interval}"
+            f"&entry_time={quote(trade['entry_time'], safe='')}&kind={kind}"
+            if path.exists() else None
+        )
+    return out
+
+
+@api_bp.get("/evolution/trades")
+def evolution_population_trades():
+    """The fund's own entry/exit history (ml.evolution.EvolutionaryForecaster.
+    fund_trades_report): for charting when it opened/closed a position, not a predicted price
+    line (same marker language as /api/box-breakout)."""
+    interval = request.args.get("interval", "1h")
+    ev, err = _population(interval)
+    if err:
+        return err
+    report = ev.fund_trades_report()
+    model_name = model_name_for("sklearn", "tuned")
+    report["trades"] = [_trade_with_snapshots(t, model_name, interval) for t in report["trades"]]
+    report["open_trade"] = _trade_with_snapshots(report["open_trade"], model_name, interval) if report["open_trade"] else None
+    return jsonify({"coin_id": request.args.get("coin_id", config.COIN_ID), "interval": interval, **report})
+
+
+@api_bp.get("/evolution/trades/snapshot.png")
+def evolution_trade_snapshot_png():
+    """Serves one trade snapshot PNG drawn by evaluation.trade_watch (see the
+    entry/exit_snapshot_url fields on /api/evolution/trades)."""
+    interval = request.args.get("interval", "1h")
+    kind = request.args.get("kind")
+    entry_time = request.args.get("entry_time")
+    if kind not in ("entry", "exit") or not entry_time:
+        return jsonify({"error": "kind (entry|exit) and entry_time are required"}), 400
+    model_name = model_name_for("sklearn", "tuned")
+    path = eval_charts.trade_snapshot_path(model_name, interval, {"entry_time": entry_time}, kind)
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    return send_file(path, mimetype="image/png", max_age=86400)
+
+
 @api_bp.get("/strategy/fund")
 def strategy_fund_report():
     """The evolving strategy fund (ml/strategy_fund.py): its position now and
-    why, its money against buy & hold since 2020 and on TEST (2023 on), year
-    by year, and the genes selection picked. Read from the report the
-    background job saves; computing it takes ~1.5 min."""
+    why, its money since 2020 and on TEST (2023 on), year by year, and the
+    genes selection picked. Read from the report the background job saves;
+    computing it takes ~1.5 min."""
     interval = request.args.get("interval", "4h")
     if interval not in strategy_fund.FUND_INTERVALS:
         return jsonify({"error": f"The strategy fund runs on {list(strategy_fund.FUND_INTERVALS)} only: on 1h the "

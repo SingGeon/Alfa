@@ -160,7 +160,6 @@ function MoneyPanel({ r, fmt, t }: { r: FundReport; fmt: Fmt; t: TFn }) {
 
     const moneyChart = createChart(moneyEl, { ...evoChartOptions(moneyEl), rightPriceScale: { borderVisible: false, minimumWidth: 70, mode: PriceScaleMode.Logarithmic } });
     const eurFmt = { type: "custom" as const, formatter: (v: number) => `${v.toFixed(0)} €` };
-    moneyChart.addLineSeries({ color: muted, lineWidth: 2, priceLineVisible: false, priceFormat: eurFmt, title: t("pop.money.hold") }).setData(pts.map((p) => ({ time: p.t, value: p.buy_hold })));
     const fund = moneyChart.addLineSeries({ color: pred, lineWidth: 2, priceLineVisible: false, priceFormat: eurFmt, title: t("fund.money.fund") });
     fund.setData(pts.map((p) => ({ time: p.t, value: p.fund })));
     fund.createPriceLine({ price: 100, color: muted, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false });
@@ -179,7 +178,7 @@ function MoneyPanel({ r, fmt, t }: { r: FundReport; fmt: Fmt; t: TFn }) {
     const byTime = new Map(pts.map((p) => [p.t, p]));
     const readoutFor = (point?: typeof pts[number]) => {
       if (!point) { setReadout({ money: "", position: "" }); return; }
-      setReadout({ money: `${fmt.eur(point.fund)} · ${fmt.eur(point.buy_hold)} · ${fmt.day(point.time)}`, position: positionLabel(t, point.position) });
+      setReadout({ money: `${fmt.eur(point.fund)} · ${fmt.day(point.time)}`, position: positionLabel(t, point.position) });
     };
     const unsync = syncPanes(charts, (time) => readoutFor(time != null ? byTime.get(time as UTCTimestamp) : pts[pts.length - 1]));
     moneyChart.timeScale().fitContent();
@@ -196,15 +195,16 @@ function MoneyPanel({ r, fmt, t }: { r: FundReport; fmt: Fmt; t: TFn }) {
       <p className="mt-2 text-[13px] text-faint">{t("fund.money.note", { from: fmt.day(r.trading_from), test: fmt.day(r.test_from) })}</p>
       <div className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-[20px] border border-line bg-line sm:grid-cols-4">
         <Tile label={t("fund.money.since", { from: fmt.day(r.trading_from) })} value={<>{fmt.eur(w.fund.money)} <small className={sign(w.fund.ret_pct)}>{fmt.pct(w.fund.ret_pct)}</small></>} />
-        <Tile label={t("pop.money.hold")} value={<>{fmt.eur(w.buy_hold.money)} <small className={sign(w.buy_hold.ret_pct)}>{fmt.pct(w.buy_hold.ret_pct)}</small></>} />
         <Tile label={t("fund.money.test")} value={<>{fmt.eur(te.fund.money)} <small className={sign(te.fund.ret_pct)}>{fmt.pct(te.fund.ret_pct)}</small></>} />
-        <Tile label={t("fund.money.testHold")} value={<>{fmt.eur(te.buy_hold.money)} <small className={sign(te.buy_hold.ret_pct)}>{fmt.pct(te.buy_hold.ret_pct)}</small></>} />
-        <Tile label={t("fund.money.dd")} value={`${fmt.num(w.fund.max_dd_pct, 0)}% · ${t("fund.money.ddHold", { dd: fmt.num(w.buy_hold.max_dd_pct, 0) })}`} />
-        <Tile label={t("fund.money.sharpe")} value={`${fmt.num(w.fund.sharpe, 2)} · ${t("fund.money.ddHold", { dd: fmt.num(w.buy_hold.sharpe, 2) })}`} />
+        <Tile label={t("fund.money.dd")} value={`${fmt.num(w.fund.max_dd_pct, 0)}%`} />
+        <Tile label={t("fund.money.sharpe")} value={fmt.num(w.fund.sharpe, 2)} />
+        <Tile label={t("fund.money.sortino")} value={fmt.num(w.fund.sortino, 2)} />
+        <Tile label={t("fund.money.calmar")} value={fmt.num(w.fund.calmar, 2)} />
         <Tile label={t("pop.money.fundTrades")} value={`${fmt.num(w.fund.trades)} · ${fmt.eur(w.fund.fees)}`} />
       </div>
+      {w.fund.low_sample && <p className="mt-2 text-[12px] text-warn">{t("fund.money.lowSample")}</p>}
       <div className="mt-4 flex items-baseline justify-between text-[12px]">
-        <span className="text-faint">{t("fund.money.fund")} · {t("pop.money.hold")}</span>
+        <span className="text-faint">{t("fund.money.fund")}</span>
         <b className="num text-bone">{readout.money}</b>
       </div>
       <div ref={moneyRef} className="mt-1.5 h-56" />
@@ -229,7 +229,7 @@ function YearsPanel({ r, fmt, t }: { r: FundReport; fmt: Fmt; t: TFn }) {
         <table className="w-full min-w-[560px] border-collapse text-[12.5px]">
           <thead>
             <tr className="border-b border-line text-left text-[11px] text-faint">
-              {[t("fund.col.year"), t("fund.col.fund"), t("fund.col.fundDd"), t("fund.col.hold"), t("fund.col.holdDd"), t("fund.col.trades")].map((h, i) => (
+              {[t("fund.col.year"), t("fund.col.fund"), t("fund.col.fundDd"), t("fund.col.trades")].map((h, i) => (
                 <th key={h} className={`py-2.5 font-medium ${i > 0 ? "px-3 text-right" : "px-3"} ${i === 0 ? "pl-4 sm:pl-5" : ""}`}>{h}</th>
               ))}
             </tr>
@@ -240,8 +240,6 @@ function YearsPanel({ r, fmt, t }: { r: FundReport; fmt: Fmt; t: TFn }) {
                 <td className="py-2.5 pl-4 pr-3 text-bone sm:pl-5">{y.year}{testYear <= y.year && <span className="ml-1.5 text-[11px] text-faint">{t("fund.years.unseen")}</span>}</td>
                 <td className="num px-3 py-2.5 text-right">{cell(y.fund_pct)}</td>
                 <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(y.fund_dd, 0)}%</td>
-                <td className="num px-3 py-2.5 text-right">{cell(y.buy_hold_pct)}</td>
-                <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(y.buy_hold_dd, 0)}%</td>
                 <td className="num px-3 py-2.5 text-right text-dim">{fmt.num(y.trades)}</td>
               </tr>
             ))}

@@ -27,7 +27,7 @@ from datetime import date
 
 from flask import Blueprint, Response, abort, jsonify, request, send_file
 
-from evaluation import charts, daily_report, stats, storage
+from evaluation import charts, daily_report, evaluator, stats, storage
 
 evaluation_bp = Blueprint("evaluation", __name__)
 
@@ -186,6 +186,19 @@ def prediction_snapshot(prediction_id: int):
 @evaluation_bp.get("/models")
 def models():
     return jsonify({"models": storage.list_models(), "intervals": list(storage.INTERVAL_ORDER)})
+
+
+@evaluation_bp.get("/validation")
+def validation():
+    """Does this model's live track record (its own completed, already-resolved predictions)
+    actually carry statistically significant direction skill? (ml.signal_validation - Ch. 7's
+    discipline, scored via evaluator.validate_model_skill). `model` is required; `interval`
+    optional (all intervals pooled if omitted)."""
+    model = request.args.get("model")
+    if not model:
+        raise _BadRequest("model is required")
+    interval = request.args.get("interval") or None
+    return jsonify({"model": model, "interval": interval, **evaluator.validate_model_skill(model, interval)})
 
 
 @evaluation_bp.get("/days")

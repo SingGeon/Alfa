@@ -32,6 +32,7 @@ import shutil
 from pathlib import Path
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 
@@ -52,6 +53,7 @@ GRID = "#545355"
 PREDICTED = "#498aa8"
 ACTUAL = "#5fb894"
 ERROR = "#d8706a"
+HIGHLIGHT = "#e8b339"   # the trade snapshots' entry/exit marker - distinct from every other color here
 
 BASELINE = "#a3a3a3"
 
@@ -323,3 +325,184 @@ def generate_missing_charts(prediction_ids: list[int] | None = None) -> int:
         except Exception:
             logger.exception("Failed to render chart for prediction %s", pred["id"])
     return drawn
+
+
+# --- Trade snapshots (ml.evolution's fund: a picture of each entry/exit, not of a forecast) --
+#
+# ml.evolution.EvolutionaryForecaster's fund decides *when* to trade, not what price to
+# predict - so, unlike every chart above, these are never drawn on a timer and never show a
+# forecast line/band. evaluation.trade_watch calls render_trade_snapshot() exactly twice per
+# trade: once the instant it opens ("entry"), once the instant it closes ("exit", showing both
+# markers together so the whole trade reads at a glance).
+
+def trade_snapshots_dir() -> Path:
+    # A function, not a module-level constant: config.EVAL_SNAPSHOTS_DIR is monkeypatched
+    # per-test (tests/conftest.py's evaluation_data_dir), and a constant computed once at
+    # import time would freeze the first value it ever saw instead of tracking that.
+    return Path(config.EVAL_SNAPSHOTS_DIR) / "trades"
+
+
+def trade_snapshot_path(model_name: str, interval: str, trade: dict, kind: str) -> Path:
+    stamp = parse_iso(trade["entry_time"]).strftime("%Y%m%dT%H%M%SZ")
+    name = f"{interval}_{model_dir_name(model_name)}_{stamp}_{kind}.png"
+    return trade_snapshots_dir() / model_dir_name(model_name) / interval / name
+
+
+def draw_trade_snapshot(trade: dict, candles: list[dict], interval: str, model_name: str, kind: str) -> Figure:
+    """Candles around one of the fund's own trades, with its entry (and exit, once it has
+    one) highlighted in gold - never a predicted price line."""
+    delta = interval_delta(interval)
+    width = delta.total_seconds() / 86400 * 0.62
+    long = trade["side"] == "long"
+    entry_time = parse_iso(trade["entry_time"])
+    has_exit = bool(trade.get("exit_time")) and trade.get("exit_price") is not None
+
+    fig = Figure(figsize=FIG_SIZE, dpi=DPI, facecolor=BACKGROUND)
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_facecolor(BACKGROUND)
+
+    if candles:
+        _draw_candles(ax, candles, width, alpha=1.0, zorder=2)
+
+    ax.scatter([entry_time], [trade["entry_price"]], marker="^" if long else "v", s=220,
+               color=HIGHLIGHT, edgecolor=TEXT, linewidth=1.2, zorder=8)
+    ax.annotate(
+        f"{'LONG' if long else 'SHORT'} ${trade['entry_price']:,.2f}", xy=(entry_time, trade["entry_price"]),
+        xytext=(0, 16), textcoords="offset points", ha="center", color=HIGHLIGHT,
+        fontsize=10, fontweight="bold", zorder=9,
+    )
+
+    if has_exit:
+        exit_time = parse_iso(trade["exit_time"])
+        ret = trade.get("return_pct")
+        exit_color = ACTUAL if (ret or 0) > 0 else ERROR
+        ax.scatter([exit_time], [trade["exit_price"]], marker="o", s=160, color=exit_color,
+                   edgecolor=TEXT, linewidth=1.2, zorder=8)
+        ax.plot([entry_time, exit_time], [trade["entry_price"], trade["exit_price"]], linestyle=":",
+                linewidth=1.3, color=HIGHLIGHT, alpha=0.8, zorder=6)
+        ret_text = "—" if ret is None else f"{ret:+.2f}%"
+        ax.annotate(
+            f"IEȘIRE {ret_text}", xy=(exit_time, trade["exit_price"]), xytext=(0, -22),
+            textcoords="offset points", ha="center", color=exit_color, fontsize=10, fontweight="bold", zorder=9,
+        )
+        status_text, status_color = f"Poziție închisă · {ret_text}", exit_color
+    else:
+        status_text, status_color = "Poziție deschisă", HIGHLIGHT
+
+    fig.subplots_adjust(top=0.78)
+    fig.text(0.125, 0.965, f"{model_label(model_name)} · {interval} · tranzacție fond", color=TEXT,
+             fontsize=14, fontweight="bold", va="top")
+    fig.text(0.125, 0.005, f"Intrare {entry_time.strftime('%Y-%m-%d %H:%M')} UTC · {'long' if long else 'short'}",
+             color=TEXT, alpha=0.7, fontsize=9, va="bottom")
+    ax.text(1.0, 1.015, status_text, transform=ax.transAxes, ha="right", va="bottom", color=status_color,
+           fontsize=10.5, fontweight="bold", zorder=10,
+           bbox={"facecolor": BACKGROUND, "edgecolor": status_color, "boxstyle": "round,pad=0.35", "alpha": 0.9})
+
+    if candles:
+        first, last = parse_iso(candles[0]["timestamp"]), parse_iso(candles[-1]["timestamp"])
+        ax.set_xlim(first - delta, last + delta)
+    ax.grid(True, color=GRID, linewidth=0.6, alpha=0.8)
+    ax.tick_params(colors=TEXT, labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color(GRID)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M", tz=entry_time.tzinfo))
+    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter("${x:,.0f}"))
+    fig.autofmt_xdate()
+    return fig
+
+
+def render_trade_snapshot(trade: dict, candles: list[dict], interval: str, model_name: str, kind: str) -> Path:
+    """kind: "entry" the instant a position opens, "exit" the instant it closes."""
+    path = trade_snapshot_path(model_name, interval, trade, kind)
+    return _save(draw_trade_snapshot(trade, candles, interval, model_name, kind), path)
+
+
+# --- Monte Carlo robustness report (ml.monte_carlo - Ch. 10: does a backtest hold up under -----
+# small price noise, or is it a fluke of one specific historical path? Settings are replayed,
+# never re-optimized, across every blurred run.
+
+def draw_monte_carlo_report(results: list[dict], title: str, return_key: str = "total_return_pct",
+                             drawdown_key: str = "max_drawdown_pct", sharpe_key: str = "sortino") -> Figure:
+    """Top: every run's equity curve overlaid (an "equity_curve" list on the result dict, by
+    trade number - absent runs are just skipped), with the median curve picked out. Bottom:
+    three histograms - final return, max drawdown, and a risk-adjusted ratio - each with a
+    fitted normal curve for scale. A visibly double-humped drawdown histogram is the book's own
+    headline warning (p.274): two different outcome "regimes" hiding in what looked like one
+    result."""
+    from scipy.stats import norm
+
+    from ml.monte_carlo import _is_bimodal
+
+    returns = np.array([r[return_key] for r in results if r.get(return_key) is not None], dtype=float)
+    drawdowns = np.array([r[drawdown_key] for r in results if r.get(drawdown_key) is not None], dtype=float)
+    sharpes = np.array([r[sharpe_key] for r in results if r.get(sharpe_key) is not None], dtype=float)
+    curves = [np.asarray(r["equity_curve"], dtype=float) for r in results if r.get("equity_curve")]
+
+    fig = Figure(figsize=(12, 8), dpi=DPI, facecolor=BACKGROUND)
+    FigureCanvasAgg(fig)
+    gs = fig.add_gridspec(2, 3, height_ratios=(1.3, 1), hspace=0.5, wspace=0.3)
+
+    ax_fan = fig.add_subplot(gs[0, :])
+    ax_fan.set_facecolor(BACKGROUND)
+    if curves:
+        max_len = max(len(c) for c in curves)
+        for c in curves:
+            ax_fan.plot(np.arange(len(c)), c, color=ACTUAL, alpha=0.08, linewidth=1, zorder=2)
+        # Shorter curves (a run with fewer closed trades) hold their last value flat so every
+        # curve reaches max_len before the median is taken - no run is cut off mid-chart.
+        padded = np.array([np.pad(c, (0, max_len - len(c)), mode="edge") for c in curves])
+        ax_fan.plot(np.arange(max_len), np.median(padded, axis=0), color=TEXT, linewidth=2,
+                    label="mediană", zorder=4)
+        ax_fan.axhline(1.0, color=GRID, linestyle=":", linewidth=1, zorder=1)
+        legend = ax_fan.legend(loc="upper left", facecolor=BACKGROUND, edgecolor=GRID, fontsize=9)
+        for text in legend.get_texts():
+            text.set_color(TEXT)
+    else:
+        ax_fan.text(0.5, 0.5, "fără curbe de echitate în rezultate", transform=ax_fan.transAxes,
+                    ha="center", va="center", color=TEXT, alpha=0.5, fontsize=10)
+    ax_fan.set_title("Curba de echitate, fiecare rulare Monte Carlo", color=TEXT, fontsize=12, fontweight="bold")
+    ax_fan.set_xlabel("tranzacție #", color=TEXT, fontsize=9)
+    ax_fan.grid(True, color=GRID, linewidth=0.6, alpha=0.6)
+    ax_fan.tick_params(colors=TEXT, labelsize=9)
+    for spine in ax_fan.spines.values():
+        spine.set_color(GRID)
+
+    panels = (
+        (returns, "Return final (%)", ACTUAL, False),
+        (drawdowns, "Drawdown maxim (%)", ERROR, True),
+        (sharpes, sharpe_key.capitalize(), PREDICTED, False),
+    )
+    for i, (values, label, color, check_bimodal) in enumerate(panels):
+        ax = fig.add_subplot(gs[1, i])
+        ax.set_facecolor(BACKGROUND)
+        if len(values):
+            ax.hist(values, bins=min(30, max(8, len(values) // 8)), color=color, alpha=0.7,
+                    edgecolor=BACKGROUND, density=True)
+            ax.axvline(float(np.median(values)), color=TEXT, linestyle="--", linewidth=1.2)
+            if np.std(values) > 0:
+                mu, sigma = norm.fit(values)
+                xs = np.linspace(values.min(), values.max(), 200)
+                ax.plot(xs, norm.pdf(xs, mu, sigma), color=TEXT, linewidth=1.3, alpha=0.9)
+        ax.set_title(label, color=TEXT, fontsize=10.5, fontweight="bold")
+        ax.grid(True, color=GRID, linewidth=0.6, alpha=0.6)
+        ax.tick_params(colors=TEXT, labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color(GRID)
+        if check_bimodal and _is_bimodal(values):
+            ax.text(0.5, 0.95, "⚠ distribuție bimodală", transform=ax.transAxes, ha="center", va="top",
+                     color=HIGHLIGHT, fontsize=9.5, fontweight="bold")
+
+    fig.subplots_adjust(top=0.90, bottom=0.08)
+    fig.text(0.04, 0.965, title, color=TEXT, fontsize=14, fontweight="bold", va="top")
+    fig.text(0.04, 0.015, f"{len(results)} rulări Monte Carlo, setările nemodificate (doar zgomot pe preț)",
+             color=TEXT, alpha=0.7, fontsize=9, va="bottom")
+    return fig
+
+
+def monte_carlo_report_path(name: str) -> Path:
+    return Path(config.EVAL_SNAPSHOTS_DIR) / "monte_carlo" / f"{name}.png"
+
+
+def render_monte_carlo_report(results: list[dict], title: str, name: str, **kwargs) -> Path:
+    return _save(draw_monte_carlo_report(results, title, **kwargs), monte_carlo_report_path(name))

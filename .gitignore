@@ -19,3 +19,6 @@ untitled.py
 # Frontend (React app in frontend/web, built into frontend/dist)
 node_modules/
 frontend/dist/
+
+# Local experiment scratch (sweeps, pickled runs, logs) - not source, not meant for version control
+notebooks/
